@@ -131,7 +131,7 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
       })
 
       measurements.append(measure(config: config, operation: "History.add.duplicate") {
-        let item = generator.makeItem(index: config.itemCount + 2, contentIndex: 0)
+        let item = generator.makeItem(index: 0, contentIndex: 0)
         _ = history.add(item)
         return history.all.count
       })
@@ -141,6 +141,9 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
   }
 
   private func measurePopupFirstPaintProxy(history: History) -> Int {
+    let savedAppState = AppStateSnapshot.capture()
+    defer { savedAppState.restore() }
+
     configurePopupProxyState(history: history)
 
     let size = Defaults[.windowSize]
@@ -261,6 +264,32 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
 
   private var environment: [String: String] {
     ProcessInfo.processInfo.environment
+  }
+}
+
+@MainActor
+private struct AppStateSnapshot {
+  let history: History
+  let footer: Footer
+  let navigator: NavigationManager
+  let preview: SlideoutController
+
+  static func capture() -> AppStateSnapshot {
+    let appState = AppState.shared
+    return AppStateSnapshot(
+      history: appState.history,
+      footer: appState.footer,
+      navigator: appState.navigator,
+      preview: appState.preview
+    )
+  }
+
+  func restore() {
+    let appState = AppState.shared
+    appState.history = history
+    appState.footer = footer
+    appState.navigator = navigator
+    appState.preview = preview
   }
 }
 
