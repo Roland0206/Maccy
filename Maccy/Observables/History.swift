@@ -431,13 +431,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   private func findSimilarItem(_ item: HistoryItem) -> HistoryItem? {
-    if let all = try? historyStore.loadAll() {
-      let duplicates = all.filter({ $0 == item || $0.supersedes(item) })
-      if duplicates.count > 1 {
-        return duplicates.first(where: { $0 != item })
-      } else {
-        return isModified(item)
-      }
+    if let candidates = try? historyStore.loadDuplicateCandidates(for: item) {
+      // Current duplicate semantics: exact match or stored superset, then modified pasteboard marker fallback.
+      return candidates.first(where: { $0 == item || $0.supersedes(item) }) ?? isModified(item)
     }
 
     return item

@@ -4,6 +4,8 @@ import SwiftData
 @MainActor
 protocol LegacyHistoryStore {
   func loadAll() throws -> [HistoryItem]
+  // Returns stored items that may duplicate item. Excludes item itself even if already inserted.
+  func loadDuplicateCandidates(for item: HistoryItem) throws -> [HistoryItem]
   func insert(_ item: HistoryItem) throws
   func delete(_ item: HistoryItem) throws
   func deleteUnpinned() throws
@@ -18,6 +20,12 @@ struct SwiftDataHistoryStore: LegacyHistoryStore {
   @MainActor
   func loadAll() throws -> [HistoryItem] {
     try Storage.shared.context.fetch(FetchDescriptor<HistoryItem>())
+  }
+
+  @MainActor
+  func loadDuplicateCandidates(for item: HistoryItem) throws -> [HistoryItem] {
+    // Current semantics compare against existing rows in memory. Future stores can narrow this set.
+    try loadAll().filter { $0 !== item }
   }
 
   @MainActor

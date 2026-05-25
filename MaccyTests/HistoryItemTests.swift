@@ -220,6 +220,22 @@ class SwiftDataHistoryStoreTests: XCTestCase {
     XCTAssertEqual(try store.countContents(), contentCount + 1)
   }
 
+  func testLoadDuplicateCandidatesReturnsExistingItemsAndExcludesRequestedItem() throws {
+    let first = historyItem("foo")
+    let second = historyItem("bar")
+    let probe = historyItem("baz")
+    try store.insert(first)
+    try store.insert(second)
+    try store.insert(probe)
+
+    let candidates = try store.loadDuplicateCandidates(for: probe)
+
+    XCTAssertEqual(candidates.count, 2)
+    XCTAssertTrue(candidates.contains { $0 === first })
+    XCTAssertTrue(candidates.contains { $0 === second })
+    XCTAssertFalse(candidates.contains { $0 === probe })
+  }
+
   func testDeleteRemovesItemAndContents() throws {
     let item = historyItem("foo")
     try store.insert(item)
@@ -262,6 +278,141 @@ class SwiftDataHistoryStoreTests: XCTestCase {
     item.title = item.generateTitle()
 
     return item
+  }
+}
+
+@MainActor
+class DuplicateCandidateLookupTests: XCTestCase {
+  let savedSize = Defaults[.size]
+  let savedSortBy = Defaults[.sortBy]
+  private let store = DuplicateCandidateHistoryStore()
+  private var history: History!
+
+  override func setUpWithError() throws {
+    try SwiftDataHistoryStore().deleteAll()
+    Defaults[.size] = 10
+    Defaults[.sortBy] = .firstCopiedAt
+    store.reset()
+    history = History(historyStore: store)
+  }
+
+  override func tearDownWithError() throws {
+    history = nil
+    try SwiftDataHistoryStore().deleteAll()
+    Defaults[.size] = savedSize
+    Defaults[.sortBy] = savedSortBy
+  }
+
+  func testExactDuplicateCandidateMergesCopyCountAndExistingMetadata() {
+    let existing = historyItem("foo")
+    existing.application = "Xcode.app"
+    existing.numberOfCopies = 3
+    existing.title = "Existing title"
+    store.duplicateCandidates = [existing]
+
+    let incoming = historyItem("foo")
+    incoming.application = "Maccy.app"
+    let added = history.add(incoming)
+
+    XCTAssertTrue(store.didLoadDuplicateCandidates)
+    XCTAssertEqual(history.items, [added])
+    XCTAssertEqual(added.item.numberOfCopies, 4)
+    XCTAssertEqual(added.item.title, "Existing title")
+    XCTAssertEqual(added.item.application, "Xcode.app")
+  }
+
+  func testSubsetDuplicateCandidateUsesExistingSupersetContents() {
+    let supersetContents = [
+      content(.string, "one"),
+      content(.rtf, "two")
+    ]
+    let existing = historyItem(contents: supersetContents)
+    store.duplicateCandidates = [existing]
+
+    let incoming = historyItem(contents: [content(.string, "one")])
+    let added = history.add(incoming)
+
+    XCTAssertEqual(history.items, [added])
+    XCTAssertEqual(Set(added.item.contents), Set(supersetContents))
+  }
+
+  func testModifiedPasteboardMarkerKeepsModifiedContentsInsteadOfMergingOriginalSessionItem() {
+    history.add(historyItem("foo"))
+
+    let modifiedItem = historyItem("bar")
+    modifiedItem.contents.append(HistoryItemContent(
+      type: NSPasteboard.PasteboardType.modified.rawValue,
+      value: String(Clipboard.shared.changeCount).data(using: .utf8)
+    ))
+    let added = history.add(modifiedItem)
+
+    XCTAssertEqual(history.items, [added])
+    XCTAssertEqual(added.item.text, "bar")
+  }
+
+  private func historyItem(_ value: String) -> HistoryItem {
+    historyItem(contents: [content(.string, value)])
+  }
+
+  private func historyItem(contents: [HistoryItemContent]) -> HistoryItem {
+    let item = HistoryItem()
+    item.contents = contents
+    item.numberOfCopies = 1
+    item.title = item.generateTitle()
+    return item
+  }
+
+  private func content(_ type: NSPasteboard.PasteboardType, _ value: String) -> HistoryItemContent {
+    HistoryItemContent(
+      type: type.rawValue,
+      value: value.data(using: .utf8)
+    )
+  }
+}
+
+@MainActor
+private final class DuplicateCandidateHistoryStore: LegacyHistoryStore {
+  var didLoadDuplicateCandidates = false
+  var duplicateCandidates: [HistoryItem] = []
+  private var items: [HistoryItem] = []
+
+  func reset() {
+    didLoadDuplicateCandidates = false
+    duplicateCandidates = []
+    items = []
+  }
+
+  func loadAll() throws -> [HistoryItem] {
+    items
+  }
+
+  func loadDuplicateCandidates(for _: HistoryItem) throws -> [HistoryItem] {
+    didLoadDuplicateCandidates = true
+    return duplicateCandidates
+  }
+
+  func insert(_ item: HistoryItem) throws {
+    items.append(item)
+  }
+
+  func delete(_ item: HistoryItem) throws {
+    items.removeAll { $0 === item }
+  }
+
+  func deleteUnpinned() throws {
+    items.removeAll { $0.pin == nil }
+  }
+
+  func deleteAll() throws {
+    items.removeAll()
+  }
+
+  func countItems() throws -> Int {
+    items.count
+  }
+
+  func countContents() throws -> Int {
+    items.flatMap(\.contents).count
   }
 }
 // swiftlint:enable force_try
