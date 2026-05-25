@@ -195,4 +195,73 @@ class HistoryItemTests: XCTestCase {
     return item
   }
 }
+
+@MainActor
+class SwiftDataHistoryStoreTests: XCTestCase {
+  let store = SwiftDataHistoryStore()
+
+  override func setUpWithError() throws {
+    try store.deleteAll()
+  }
+
+  override func tearDownWithError() throws {
+    try store.deleteAll()
+  }
+
+  func testLoadAllReturnsInsertedItems() throws {
+    let itemCount = try store.countItems()
+    let contentCount = try store.countContents()
+    let item = historyItem("foo")
+
+    try store.insert(item)
+
+    XCTAssertTrue(try store.loadAll().contains { $0 === item })
+    XCTAssertEqual(try store.countItems(), itemCount + 1)
+    XCTAssertEqual(try store.countContents(), contentCount + 1)
+  }
+
+  func testDeleteRemovesItemAndContents() throws {
+    let item = historyItem("foo")
+    try store.insert(item)
+    let itemCount = try store.countItems()
+    let contentCount = try store.countContents()
+
+    try store.delete(item)
+
+    XCTAssertFalse(try store.loadAll().contains { $0 === item })
+    XCTAssertEqual(try store.countItems(), itemCount - 1)
+    XCTAssertEqual(try store.countContents(), contentCount - 1)
+  }
+
+  func testDeleteUnpinnedPreservesPinnedItemsThenDeleteAllRemovesEverything() throws {
+    let pinned = historyItem("foo")
+    pinned.pin = "f"
+    let unpinned = historyItem("bar")
+    try store.insert(pinned)
+    try store.insert(unpinned)
+
+    try store.deleteUnpinned()
+
+    XCTAssertTrue(try store.loadAll().contains { $0 === pinned })
+    XCTAssertFalse(try store.loadAll().contains { $0 === unpinned })
+
+    try store.deleteAll()
+
+    XCTAssertFalse(try store.loadAll().contains { $0 === pinned })
+  }
+
+  private func historyItem(_ value: String) -> HistoryItem {
+    let contents = [
+      HistoryItemContent(
+        type: NSPasteboard.PasteboardType.string.rawValue,
+        value: value.data(using: .utf8)
+      )
+    ]
+    let item = HistoryItem()
+    item.contents = contents
+    item.title = item.generateTitle()
+
+    return item
+  }
+}
 // swiftlint:enable force_try
