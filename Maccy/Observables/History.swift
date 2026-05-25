@@ -59,6 +59,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   private let historyStore: any LegacyHistoryStore
 
   @ObservationIgnored
+  private let popupHistoryStore: any PopupHistoryStore
+
+  @ObservationIgnored
   private var sessionLog: [Int: HistoryItem] = [:]
 
   // The distinction between `all` and `items` is the following:
@@ -67,8 +70,12 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @ObservationIgnored
   var all: [HistoryItemDecorator] = []
 
-  init(historyStore: any LegacyHistoryStore = SwiftDataHistoryStore()) {
+  init(
+    historyStore: any LegacyHistoryStore = SwiftDataHistoryStore(),
+    popupHistoryStore: (any PopupHistoryStore)? = nil
+  ) {
     self.historyStore = historyStore
+    self.popupHistoryStore = popupHistoryStore ?? SwiftDataPopupHistoryStore(historyStore: historyStore)
 
     Task {
       for await _ in Defaults.updates(.pasteByDefault, initial: false) {
@@ -107,7 +114,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func load() async throws {
-    let results = try historyStore.loadAll()
+    let page = try popupHistoryStore.loadInitialRows(recentLimit: Defaults[.popupRecentPageSize])
+    let results = try page.rows.map { try popupHistoryStore.materialize($0) }
     all = sorter.sort(results).map { HistoryItemDecorator($0) }
     items = all
 

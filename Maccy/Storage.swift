@@ -1,6 +1,85 @@
 import Foundation
 import SwiftData
 
+struct PopupHistoryRowContent: Equatable {
+  let type: String
+  let size: Int
+  let hasPayload: Bool
+}
+
+struct PopupHistoryRow: Equatable, Identifiable {
+  enum Source: Equatable {
+    case legacy(ObjectIdentifier)
+    case archive(id: Int64)
+  }
+
+  let id: String
+  let source: Source
+  let title: String
+  let applicationBundleIdentifier: String?
+  let firstCopiedAt: Date
+  let lastCopiedAt: Date
+  let numberOfCopies: Int
+  let pin: String?
+  let contents: [PopupHistoryRowContent]
+  private let legacyItem: HistoryItem?
+
+  var isPinned: Bool { pin != nil }
+
+  static func == (lhs: PopupHistoryRow, rhs: PopupHistoryRow) -> Bool {
+    lhs.id == rhs.id &&
+      lhs.source == rhs.source &&
+      lhs.title == rhs.title &&
+      lhs.applicationBundleIdentifier == rhs.applicationBundleIdentifier &&
+      lhs.firstCopiedAt == rhs.firstCopiedAt &&
+      lhs.lastCopiedAt == rhs.lastCopiedAt &&
+      lhs.numberOfCopies == rhs.numberOfCopies &&
+      lhs.pin == rhs.pin &&
+      lhs.contents == rhs.contents
+  }
+
+  init(legacyItem item: HistoryItem) {
+    let objectID = ObjectIdentifier(item)
+    id = "legacy-\(objectID.hashValue)"
+    source = .legacy(objectID)
+    title = item.title
+    applicationBundleIdentifier = item.application
+    firstCopiedAt = item.firstCopiedAt
+    lastCopiedAt = item.lastCopiedAt
+    numberOfCopies = item.numberOfCopies
+    pin = item.pin
+    contents = item.contents.map { content in
+      PopupHistoryRowContent(
+        type: content.type,
+        size: content.value?.count ?? 0,
+        hasPayload: content.value != nil
+      )
+    }
+    legacyItem = item
+  }
+
+  func materializeLegacyItem() -> HistoryItem? {
+    legacyItem
+  }
+}
+
+struct PopupHistoryPage: Equatable {
+  let pinnedRows: [PopupHistoryRow]
+  let recentRows: [PopupHistoryRow]
+
+  var rows: [PopupHistoryRow] { pinnedRows + recentRows }
+}
+
+enum PopupHistoryStoreError: Error, Equatable {
+  case unsupportedRow(String)
+}
+
+@MainActor
+protocol PopupHistoryStore {
+  func loadInitialRows(recentLimit: Int) throws -> PopupHistoryPage
+  func materialize(_ row: PopupHistoryRow) throws -> HistoryItem
+}
+
 @MainActor
 protocol LegacyHistoryStore {
   func loadAll() throws -> [HistoryItem]
@@ -12,6 +91,33 @@ protocol LegacyHistoryStore {
   func deleteAll() throws
   func countItems() throws -> Int
   func countContents() throws -> Int
+}
+
+struct SwiftDataPopupHistoryStore: PopupHistoryStore {
+  nonisolated(unsafe) private let historyStore: any LegacyHistoryStore
+
+  nonisolated init(historyStore: any LegacyHistoryStore = SwiftDataHistoryStore()) {
+    self.historyStore = historyStore
+  }
+
+  @MainActor
+  func loadInitialRows(recentLimit _: Int) throws -> PopupHistoryPage {
+    let rows = try historyStore.loadAll().map { PopupHistoryRow(legacyItem: $0) }
+    return PopupHistoryPage(
+      pinnedRows: rows.filter(\.isPinned),
+      recentRows: rows.filter { !$0.isPinned }
+    )
+  }
+
+  @MainActor
+  func materialize(_ row: PopupHistoryRow) throws -> HistoryItem {
+    guard case .legacy = row.source,
+          let item = row.materializeLegacyItem() else {
+      throw PopupHistoryStoreError.unsupportedRow(row.id)
+    }
+
+    return item
+  }
 }
 
 struct SwiftDataHistoryStore: LegacyHistoryStore {

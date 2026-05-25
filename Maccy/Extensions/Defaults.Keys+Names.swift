@@ -41,6 +41,7 @@ extension Defaults.Keys {
   static let pasteByDefault = Key<Bool>("pasteByDefault", default: false)
   static let pinTo = Key<PinsPosition>("pinTo", default: .top)
   static let popupPosition = Key<PopupPosition>("popupPosition", default: .cursor)
+  static let popupRecentPageSize = Key<Int>("popupRecentPageSize", default: 200)
   static let popupScreen = Key<Int>("popupScreen", default: 0)
   static let previewDelay = Key<Int>("previewDelay", default: 1500)
   static let removeFormattingByDefault = Key<Bool>("removeFormattingByDefault", default: false)
