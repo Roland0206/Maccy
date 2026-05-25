@@ -2,27 +2,53 @@
 import AppKit
 import Defaults
 import MachO
+import SwiftUI
 import XCTest
 @testable import Maccy
 
 @MainActor
 final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this type_body_length
   private var savedSearchMode = Defaults[.searchMode]
+  private var savedSearchVisibility = Defaults[.searchVisibility]
+  private var savedShowApplicationIcons = Defaults[.showApplicationIcons]
+  private var savedShowFooter = Defaults[.showFooter]
+  private var savedShowSearch = Defaults[.showSearch]
+  private var savedShowTitle = Defaults[.showTitle]
   private var savedSize = Defaults[.size]
   private var savedSortBy = Defaults[.sortBy]
+  private var savedWindowSize = Defaults[.windowSize]
 
   override func setUp() {
     super.setUp()
     savedSearchMode = Defaults[.searchMode]
+    savedSearchVisibility = Defaults[.searchVisibility]
+    savedShowApplicationIcons = Defaults[.showApplicationIcons]
+    savedShowFooter = Defaults[.showFooter]
+    savedShowSearch = Defaults[.showSearch]
+    savedShowTitle = Defaults[.showTitle]
     savedSize = Defaults[.size]
     savedSortBy = Defaults[.sortBy]
+    savedWindowSize = Defaults[.windowSize]
+
+    Defaults[.searchVisibility] = .always
+    Defaults[.showApplicationIcons] = false
+    Defaults[.showFooter] = true
+    Defaults[.showSearch] = true
+    Defaults[.showTitle] = true
     Defaults[.sortBy] = .lastCopiedAt
+    Defaults[.windowSize] = NSSize(width: 450, height: 800)
   }
 
   override func tearDown() {
     Defaults[.searchMode] = savedSearchMode
+    Defaults[.searchVisibility] = savedSearchVisibility
+    Defaults[.showApplicationIcons] = savedShowApplicationIcons
+    Defaults[.showFooter] = savedShowFooter
+    Defaults[.showSearch] = savedShowSearch
+    Defaults[.showTitle] = savedShowTitle
     Defaults[.size] = savedSize
     Defaults[.sortBy] = savedSortBy
+    Defaults[.windowSize] = savedWindowSize
     super.tearDown()
   }
 
@@ -87,6 +113,10 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
         return history.all.count
       })
 
+      measurements.append(measure(config: config, operation: "Popup.firstPaintProxy") {
+        measurePopupFirstPaintProxy(history: history)
+      })
+
       for mode in Search.Mode.allCases {
         Defaults[.searchMode] = mode
         measurements.append(measure(config: config, operation: "Search.\(mode.rawValue)") {
@@ -108,6 +138,33 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
     }
 
     return measurements
+  }
+
+  private func measurePopupFirstPaintProxy(history: History) -> Int {
+    configurePopupProxyState(history: history)
+
+    let size = Defaults[.windowSize]
+    let host = NSHostingView(rootView: PopupFirstPaintProxyView())
+    host.frame = NSRect(origin: .zero, size: size)
+    host.layoutSubtreeIfNeeded()
+    host.displayIfNeeded()
+
+    return history.items.count
+  }
+
+  private func configurePopupProxyState(history: History) {
+    let appState = AppState.shared
+    let footer = Footer()
+
+    appState.history = history
+    appState.footer = footer
+    appState.navigator = NavigationManager(history: history, footer: footer)
+    appState.preview = SlideoutController(
+      onContentResize: { Defaults[.windowSize].width = $0 },
+      onSlideoutResize: { Defaults[.previewWidth] = $0 }
+    )
+    appState.preview.contentWidth = Defaults[.windowSize].width
+    appState.preview.slideoutWidth = Defaults[.previewWidth]
   }
 
   private func query(for mode: Search.Mode) -> String {
@@ -204,6 +261,36 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
 
   private var environment: [String: String] {
     ProcessInfo.processInfo.environment
+  }
+}
+
+private struct PopupFirstPaintProxyView: View {
+  @State private var appState = AppState.shared
+  @State private var modifierFlags = ModifierFlags()
+  @FocusState private var searchFocused: Bool
+
+  var body: some View {
+    ZStack {
+      VisualEffectView()
+
+      VStack(spacing: 0) {
+        ListHeaderView(searchFocused: $searchFocused, searchQuery: $appState.history.searchQuery)
+          .padding(.top, Popup.verticalPadding)
+          .padding(.horizontal, Popup.horizontalPadding + 10)
+
+        HistoryListView(
+          searchQuery: $appState.history.searchQuery,
+          searchFocused: $searchFocused
+        )
+
+        FooterView(footer: appState.footer)
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .frame(width: Defaults[.windowSize].width, height: Defaults[.windowSize].height)
+    .environment(appState)
+    .environment(modifierFlags)
+    .environment(\.scenePhase, .active)
   }
 }
 
