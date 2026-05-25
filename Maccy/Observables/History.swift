@@ -6,7 +6,6 @@ import Logging
 import Observation
 import Sauce
 import Settings
-import SwiftData
 
 @Observable
 class History: ItemsContainer { // swiftlint:disable:this type_body_length
@@ -57,6 +56,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   private let throttler = Throttler(minimumDelay: 0.2)
 
   @ObservationIgnored
+  private let historyStore: any LegacyHistoryStore
+
+  @ObservationIgnored
   private var sessionLog: [Int: HistoryItem] = [:]
 
   // The distinction between `all` and `items` is the following:
@@ -65,7 +67,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @ObservationIgnored
   var all: [HistoryItemDecorator] = []
 
-  init() {
+  init(historyStore: any LegacyHistoryStore = SwiftDataHistoryStore()) {
+    self.historyStore = historyStore
+
     Task {
       for await _ in Defaults.updates(.pasteByDefault, initial: false) {
         updateShortcuts()
@@ -103,8 +107,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func load() async throws {
-    let descriptor = FetchDescriptor<HistoryItem>()
-    let results = try Storage.shared.context.fetch(descriptor)
+    let results = try historyStore.loadAll()
     all = sorter.sort(results).map { HistoryItemDecorator($0) }
     items = all
 
@@ -128,9 +131,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @MainActor
   func insertIntoStorage(_ item: HistoryItem) throws {
     logger.info("Inserting item with id '\(item.title)'")
-    Storage.shared.context.insert(item)
-    Storage.shared.context.processPendingChanges()
-    try? Storage.shared.context.save()
+    try historyStore.insert(item)
   }
 
   @discardableResult
@@ -156,7 +157,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
         item.application = existingHistoryItem.application
       }
       logger.info("Removing duplicate item '\(item.title)'")
-      Storage.shared.context.delete(existingHistoryItem)
+      try? historyStore.delete(existingHistoryItem)
       removedItemIndex = all.firstIndex(where: { $0.item == existingHistoryItem })
       if let removedItemIndex {
         all.remove(at: removedItemIndex)
@@ -199,8 +200,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @MainActor
   private func withLogging(_ msg: String, _ block: () throws -> Void) rethrows {
     func dataCounts() -> String {
-      let historyItemCount = try? Storage.shared.context.fetchCount(FetchDescriptor<HistoryItem>())
-      let historyContentCount = try? Storage.shared.context.fetchCount(FetchDescriptor<HistoryItemContent>())
+      let historyItemCount = try? historyStore.countItems()
+      let historyContentCount = try? historyStore.countContents()
       return "HistoryItem=\(historyItemCount ?? 0) HistoryItemContent=\(historyContentCount ?? 0)"
     }
 
@@ -221,18 +222,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       sessionLog.removeValues { $0.pin == nil }
       items = all
 
-      try? Storage.shared.context.transaction {
-        try? Storage.shared.context.delete(
-          model: HistoryItem.self,
-          where: #Predicate { $0.pin == nil }
-        )
-        try? Storage.shared.context.delete(
-          model: HistoryItemContent.self,
-          where: #Predicate { $0.item?.pin == nil }
-        )
-      }
-      Storage.shared.context.processPendingChanges()
-      try? Storage.shared.context.save()
+      try? historyStore.deleteUnpinned()
     }
 
     Clipboard.shared.clear()
@@ -252,9 +242,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       sessionLog.removeAll()
       items = all
 
-      try? Storage.shared.context.delete(model: HistoryItem.self)
-      Storage.shared.context.processPendingChanges()
-      try? Storage.shared.context.save()
+      try? historyStore.deleteAll()
     }
 
     Clipboard.shared.clear()
@@ -270,9 +258,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
     cleanup(item)
     withLogging("Removing history item") {
-      Storage.shared.context.delete(item.item)
-      Storage.shared.context.processPendingChanges()
-      try? Storage.shared.context.save()
+      try? historyStore.delete(item.item)
     }
 
     all.removeAll { $0 == item }
@@ -445,8 +431,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   private func findSimilarItem(_ item: HistoryItem) -> HistoryItem? {
-    let descriptor = FetchDescriptor<HistoryItem>()
-    if let all = try? Storage.shared.context.fetch(descriptor) {
+    if let all = try? historyStore.loadAll() {
       let duplicates = all.filter({ $0 == item || $0.supersedes(item) })
       if duplicates.count > 1 {
         return duplicates.first(where: { $0 != item })
