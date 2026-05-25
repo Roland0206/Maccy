@@ -220,18 +220,20 @@ class SwiftDataHistoryStoreTests: XCTestCase {
     XCTAssertEqual(try store.countContents(), contentCount + 1)
   }
 
-  func testLoadDuplicateCandidatesCurrentlyReturnsAllItemsForInMemoryComparison() throws {
+  func testLoadDuplicateCandidatesReturnsExistingItemsAndExcludesRequestedItem() throws {
     let first = historyItem("foo")
     let second = historyItem("bar")
     let probe = historyItem("baz")
     try store.insert(first)
     try store.insert(second)
+    try store.insert(probe)
 
     let candidates = try store.loadDuplicateCandidates(for: probe)
 
     XCTAssertEqual(candidates.count, 2)
     XCTAssertTrue(candidates.contains { $0 === first })
     XCTAssertTrue(candidates.contains { $0 === second })
+    XCTAssertFalse(candidates.contains { $0 === probe })
   }
 
   func testDeleteRemovesItemAndContents() throws {
@@ -384,9 +386,9 @@ private final class DuplicateCandidateHistoryStore: LegacyHistoryStore {
     items
   }
 
-  func loadDuplicateCandidates(for item: HistoryItem) throws -> [HistoryItem] {
+  func loadDuplicateCandidates(for _: HistoryItem) throws -> [HistoryItem] {
     didLoadDuplicateCandidates = true
-    return duplicateCandidates + [item]
+    return duplicateCandidates
   }
 
   func insert(_ item: HistoryItem) throws {
