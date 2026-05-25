@@ -23,6 +23,7 @@ struct PopupHistoryRow: Equatable, Identifiable {
   let pin: String?
   let contents: [PopupHistoryRowContent]
   private let legacyItem: HistoryItem?
+  private let archiveItem: ArchiveItemSnapshot?
 
   var isPinned: Bool { pin != nil }
 
@@ -56,10 +57,46 @@ struct PopupHistoryRow: Equatable, Identifiable {
       )
     }
     legacyItem = item
+    archiveItem = nil
+  }
+
+  init(archiveItem item: ArchiveItemSnapshot) {
+    id = "archive-\(item.id)"
+    source = .archive(id: item.id)
+    title = item.title ?? item.pinTitle ?? item.searchTitle ?? item.searchText ?? ""
+    applicationBundleIdentifier = item.sourceAppBundleIdentifier
+    firstCopiedAt = popupArchiveDateFormatter.date(from: item.firstSeenAt) ?? .distantPast
+    lastCopiedAt = popupArchiveDateFormatter.date(from: item.lastSeenAt) ?? .distantPast
+    numberOfCopies = item.changeCount
+    pin = item.pinKey
+    contents = item.representations.map { representation in
+      PopupHistoryRowContent(
+        type: representation.type,
+        size: representation.size,
+        hasPayload: true
+      )
+    }
+    legacyItem = nil
+    archiveItem = item
   }
 
   func materializeLegacyItem() -> HistoryItem? {
     legacyItem
+  }
+
+  func materializeArchiveItem() -> HistoryItem? {
+    guard let archiveItem else { return nil }
+
+    let item = HistoryItem(contents: archiveItem.representations.map { representation in
+      HistoryItemContent(type: representation.type, value: representation.value)
+    })
+    item.application = archiveItem.sourceAppBundleIdentifier
+    item.firstCopiedAt = firstCopiedAt
+    item.lastCopiedAt = lastCopiedAt
+    item.numberOfCopies = archiveItem.changeCount
+    item.pin = archiveItem.pinKey
+    item.title = title
+    return item
   }
 }
 
@@ -113,6 +150,33 @@ struct SwiftDataPopupHistoryStore: PopupHistoryStore {
   func materialize(_ row: PopupHistoryRow) throws -> HistoryItem {
     guard case .legacy = row.source,
           let item = row.materializeLegacyItem() else {
+      throw PopupHistoryStoreError.unsupportedRow(row.id)
+    }
+
+    return item
+  }
+}
+
+struct ArchivePopupHistoryStore: PopupHistoryStore {
+  nonisolated(unsafe) private let database: ArchiveDatabase
+
+  nonisolated init(database: ArchiveDatabase) {
+    self.database = database
+  }
+
+  @MainActor
+  func loadInitialRows(recentLimit: Int) throws -> PopupHistoryPage {
+    let pinnedRows = try database.pinnedItems().map { PopupHistoryRow(archiveItem: $0) }
+    let recentRows = try database.firstRecentPage(limit: recentLimit).items.map {
+      PopupHistoryRow(archiveItem: $0)
+    }
+    return PopupHistoryPage(pinnedRows: pinnedRows, recentRows: recentRows)
+  }
+
+  @MainActor
+  func materialize(_ row: PopupHistoryRow) throws -> HistoryItem {
+    guard case .archive = row.source,
+          let item = row.materializeArchiveItem() else {
       throw PopupHistoryStoreError.unsupportedRow(row.id)
     }
 
@@ -183,6 +247,13 @@ struct SwiftDataHistoryStore: LegacyHistoryStore {
     try Storage.shared.context.fetchCount(FetchDescriptor<HistoryItemContent>())
   }
 }
+
+private let popupArchiveDateFormatter: ISO8601DateFormatter = {
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  formatter.timeZone = TimeZone(secondsFromGMT: 0)
+  return formatter
+}()
 
 @MainActor
 class Storage {

@@ -75,7 +75,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     popupHistoryStore: (any PopupHistoryStore)? = nil
   ) {
     self.historyStore = historyStore
-    self.popupHistoryStore = popupHistoryStore ?? SwiftDataPopupHistoryStore(historyStore: historyStore)
+    self.popupHistoryStore = popupHistoryStore ??
+      ArchiveDatabaseBootstrap.popupHistoryStoreIfEnabled() ??
+      SwiftDataPopupHistoryStore(historyStore: historyStore)
 
     Task {
       for await _ in Defaults.updates(.pasteByDefault, initial: false) {

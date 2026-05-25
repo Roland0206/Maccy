@@ -565,12 +565,34 @@ enum ArchiveDatabaseBootstrap {
     }
 
     do {
-      let database = try ArchiveDatabase.open()
-      _ = try database.healthCheck()
-      Self.database = database
+      _ = try sharedDatabase()
     } catch {
       NSLog("Maccy archive database bootstrap failed: \(error.localizedDescription)")
     }
+  }
+
+  static func popupHistoryStoreIfEnabled() -> (any PopupHistoryStore)? {
+    guard ArchiveDatabaseFeature.isEnabled else {
+      return nil
+    }
+
+    do {
+      return ArchivePopupHistoryStore(database: try sharedDatabase())
+    } catch {
+      NSLog("Maccy archive popup history store failed: \(error.localizedDescription)")
+      return nil
+    }
+  }
+
+  private static func sharedDatabase() throws -> ArchiveDatabase {
+    if let database {
+      return database
+    }
+
+    let database = try ArchiveDatabase.open()
+    _ = try database.healthCheck()
+    Self.database = database
+    return database
   }
 }
 
