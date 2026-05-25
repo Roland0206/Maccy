@@ -4,6 +4,7 @@ import SwiftData
 @MainActor
 protocol LegacyHistoryStore {
   func loadAll() throws -> [HistoryItem]
+  func loadDuplicateCandidates(for item: HistoryItem) throws -> [HistoryItem]
   func insert(_ item: HistoryItem) throws
   func delete(_ item: HistoryItem) throws
   func deleteUnpinned() throws
@@ -18,6 +19,12 @@ struct SwiftDataHistoryStore: LegacyHistoryStore {
   @MainActor
   func loadAll() throws -> [HistoryItem] {
     try Storage.shared.context.fetch(FetchDescriptor<HistoryItem>())
+  }
+
+  @MainActor
+  func loadDuplicateCandidates(for _: HistoryItem) throws -> [HistoryItem] {
+    // Current semantics compare against every row in memory. Store-level seam lets future stores narrow this set.
+    try loadAll()
   }
 
   @MainActor
