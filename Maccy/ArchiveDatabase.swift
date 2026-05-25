@@ -44,6 +44,18 @@ struct ArchiveImportReport: Equatable {
   var errorCount: Int { errors.count }
 }
 
+struct ArchiveRecentPageCursor: Equatable {
+  let lastCopiedAt: String
+  let id: Int64
+}
+
+struct ArchiveRecentPage: Equatable {
+  let items: [ArchiveItemSnapshot]
+  let nextCursor: ArchiveRecentPageCursor?
+
+  var hasMore: Bool { nextCursor != nil }
+}
+
 struct ArchiveSnapshot: Equatable {
   let items: [ArchiveItemSnapshot]
 
@@ -202,14 +214,104 @@ final class ArchiveDatabase {
 
   func archiveSnapshot() throws -> ArchiveSnapshot {
     try pool.read { db in
-      var items = try ArchiveItemSnapshot.fetchAll(db, sql: Self.archiveItemsSQL)
-      let representations = try ArchiveRepresentationSnapshot.fetchAll(db, sql: Self.archiveRepresentationsSQL)
+      ArchiveSnapshot(items: try Self.fetchArchiveItems(db, sql: Self.archiveItemsSQL))
+    }
+  }
 
-      for index in items.indices {
-        items[index].representations = representations.filter { $0.itemID == items[index].id }
+  func firstRecentPage(limit: Int) throws -> ArchiveRecentPage {
+    try fetchRecentPage(after: nil, limit: limit)
+  }
+
+  func recentPage(after cursor: ArchiveRecentPageCursor, limit: Int) throws -> ArchiveRecentPage {
+    try fetchRecentPage(after: cursor, limit: limit)
+  }
+
+  func pinnedItems() throws -> [ArchiveItemSnapshot] {
+    try pool.read { db in
+      try Self.fetchArchiveItems(db, sql: Self.pinnedItemsSQL)
+    }
+  }
+
+  func recentPageQueryPlan(limit: Int = 1) throws -> [String] {
+    try pool.read { db in
+      let rows = try Row.fetchAll(
+        db,
+        sql: "EXPLAIN QUERY PLAN \(Self.recentItemsSQL(hasCursor: false))",
+        arguments: [max(limit, 1)]
+      )
+      return rows.map { $0["detail"] }
+    }
+  }
+
+  func softDeleteItem(id: Int64, at deletedAt: Date = Date()) throws {
+    try pool.write { db in
+      try db.execute(
+        sql: "UPDATE clipboard_items SET deleted_at = ? WHERE id = ?",
+        arguments: [Self.archiveTimestamp(deletedAt), id]
+      )
+    }
+  }
+
+  private func fetchRecentPage(after cursor: ArchiveRecentPageCursor?, limit: Int) throws -> ArchiveRecentPage {
+    guard limit > 0 else {
+      return ArchiveRecentPage(items: [], nextCursor: nil)
+    }
+
+    let fetchLimit = limit + 1
+    let arguments: StatementArguments
+    if let cursor {
+      arguments = [cursor.lastCopiedAt, cursor.lastCopiedAt, cursor.id, fetchLimit]
+    } else {
+      arguments = [fetchLimit]
+    }
+
+    return try pool.read { db in
+      var items = try Self.fetchArchiveItems(
+        db,
+        sql: Self.recentItemsSQL(hasCursor: cursor != nil),
+        arguments: arguments
+      )
+      let hasMore = items.count > limit
+      if hasMore {
+        items.removeLast()
       }
+      let nextCursor = hasMore ? items.last.map {
+        ArchiveRecentPageCursor(lastCopiedAt: $0.lastSeenAt, id: $0.id)
+      } : nil
 
-      return ArchiveSnapshot(items: items)
+      return ArchiveRecentPage(items: items, nextCursor: nextCursor)
+    }
+  }
+
+  private static func fetchArchiveItems(
+    _ db: Database,
+    sql: String,
+    arguments: StatementArguments = []
+  ) throws -> [ArchiveItemSnapshot] {
+    var items = try ArchiveItemSnapshot.fetchAll(db, sql: sql, arguments: arguments)
+    try attachRepresentations(to: &items, db: db)
+    return items
+  }
+
+  private static func attachRepresentations(to items: inout [ArchiveItemSnapshot], db: Database) throws {
+    guard !items.isEmpty else { return }
+
+    let itemIDs = items.map(\.id)
+    let placeholders = Array(repeating: "?", count: itemIDs.count).joined(separator: ", ")
+    let representations = try ArchiveRepresentationSnapshot.fetchAll(
+      db,
+      sql: """
+        SELECT item_id, type, value, size, payload_hash
+        FROM clipboard_representations
+        WHERE item_id IN (\(placeholders))
+        ORDER BY item_id, id
+        """,
+      arguments: StatementArguments(itemIDs)
+    )
+    let representationsByItemID = Dictionary(grouping: representations, by: \.itemID)
+
+    for index in items.indices {
+      items[index].representations = representationsByItemID[items[index].id] ?? []
     }
   }
 
@@ -237,6 +339,9 @@ final class ArchiveDatabase {
       if try !pinsHaveKey(db) {
         try db.execute(sql: "ALTER TABLE pins ADD COLUMN key TEXT")
       }
+    }
+    migrator.registerMigration("v3_recent_page_indexes", foreignKeyChecks: .immediate) { db in
+      try db.execute(sql: Self.recentItemsIndexSQL)
     }
     return migrator
   }
@@ -492,7 +597,7 @@ private extension ArchiveDatabase {
       AND name NOT LIKE 'sqlite_%'
     """
 
-  static let archiveItemsSQL = """
+  static let archiveItemSelectSQL = """
     SELECT
       clipboard_items.id,
       source_apps.bundle_identifier AS source_app_bundle_identifier,
@@ -512,8 +617,47 @@ private extension ArchiveDatabase {
     LEFT JOIN source_apps ON source_apps.id = clipboard_items.source_app_id
     LEFT JOIN pins ON pins.item_id = clipboard_items.id
     LEFT JOIN clipboard_search_docs ON clipboard_search_docs.item_id = clipboard_items.id
+    """
+
+  static let archiveItemsSQL = """
+    \(archiveItemSelectSQL)
     ORDER BY clipboard_items.id
     """
+
+  static let pinnedItemsSQL = """
+    \(archiveItemSelectSQL)
+    WHERE clipboard_items.deleted_at IS NULL
+      AND pins.item_id IS NOT NULL
+    ORDER BY pins.position, clipboard_items.id DESC
+    """
+
+  static let recentItemsIndexSQL = """
+    CREATE INDEX IF NOT EXISTS clipboard_items_recent_not_deleted_index
+    ON clipboard_items(last_seen_at DESC, id DESC)
+    WHERE deleted_at IS NULL
+    """
+
+  static func recentItemsSQL(hasCursor: Bool) -> String {
+    let cursorPredicate = hasCursor ? """
+
+      AND (
+        clipboard_items.last_seen_at < ?
+        OR (clipboard_items.last_seen_at = ? AND clipboard_items.id < ?)
+      )
+    """ : ""
+
+    return """
+      \(archiveItemSelectSQL)
+      WHERE clipboard_items.deleted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM pins
+          WHERE pins.item_id = clipboard_items.id
+        )\(cursorPredicate)
+      ORDER BY clipboard_items.last_seen_at DESC, clipboard_items.id DESC
+      LIMIT ?
+      """
+  }
 
   static let archiveRepresentationsSQL = """
     SELECT item_id, type, value, size, payload_hash
@@ -547,6 +691,7 @@ private extension ArchiveDatabase {
     """,
     "CREATE INDEX clipboard_items_source_app_id_index ON clipboard_items(source_app_id)",
     "CREATE INDEX clipboard_items_last_seen_at_index ON clipboard_items(last_seen_at)",
+    recentItemsIndexSQL,
     """
     CREATE TABLE clipboard_representations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
