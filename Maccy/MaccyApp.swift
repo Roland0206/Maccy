@@ -9,6 +9,10 @@ struct MaccyApp: App {
   // scene that is always hidden.
   @State private var hiddenMenu: Bool = false
 
+  init() {
+    ArchiveDatabaseBootstrap.bootstrapIfEnabled()
+  }
+
   var body: some Scene {
     MenuBarExtra("", isInserted: $hiddenMenu) {
       EmptyView()
