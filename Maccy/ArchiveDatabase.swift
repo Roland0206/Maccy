@@ -1,3 +1,5 @@
+import AppKit
+import CryptoKit
 import Foundation
 import GRDB
 
@@ -21,6 +23,85 @@ struct ArchiveDatabaseHealth: Equatable {
     ]
 
     return requiredTables.allSatisfy(schemaTables.contains)
+  }
+}
+
+struct ArchiveImportError: Equatable {
+  let itemIndex: Int
+  let contentIndex: Int?
+  let reason: String
+}
+
+struct ArchiveImportReport: Equatable {
+  var itemsSeen: Int
+  var itemsImported = 0
+  var representationsSeen = 0
+  var representationsImported = 0
+  var pinsImported = 0
+  var searchDocumentsImported = 0
+  var errors: [ArchiveImportError] = []
+
+  var errorCount: Int { errors.count }
+}
+
+struct ArchiveSnapshot: Equatable {
+  let items: [ArchiveItemSnapshot]
+
+  var itemCount: Int { items.count }
+  var representationCount: Int { items.reduce(0) { $0 + $1.representations.count } }
+  var pinCount: Int { items.filter { $0.pinKey != nil }.count }
+  var searchDocumentCount: Int { items.filter { $0.searchTitle != nil || $0.searchText != nil }.count }
+}
+
+struct ArchiveItemSnapshot: Equatable, FetchableRecord {
+  let id: Int64
+  let sourceAppBundleIdentifier: String?
+  let sourceAppName: String?
+  let itemHash: String?
+  let title: String?
+  let firstSeenAt: String
+  let lastSeenAt: String
+  let changeCount: Int
+  let deletedAt: String?
+  let pinPosition: Int?
+  let pinKey: String?
+  let pinTitle: String?
+  let searchTitle: String?
+  let searchText: String?
+  var representations: [ArchiveRepresentationSnapshot]
+
+  init(row: Row) throws {
+    id = row["id"]
+    sourceAppBundleIdentifier = row["source_app_bundle_identifier"]
+    sourceAppName = row["source_app_name"]
+    itemHash = row["item_hash"]
+    title = row["title"]
+    firstSeenAt = row["first_seen_at"]
+    lastSeenAt = row["last_seen_at"]
+    changeCount = row["change_count"]
+    deletedAt = row["deleted_at"]
+    pinPosition = row["pin_position"]
+    pinKey = row["pin_key"]
+    pinTitle = row["pin_title"]
+    searchTitle = row["search_title"]
+    searchText = row["search_text"]
+    representations = []
+  }
+}
+
+struct ArchiveRepresentationSnapshot: Equatable, FetchableRecord {
+  let itemID: Int64
+  let type: String
+  let value: Data
+  let size: Int
+  let payloadHash: String?
+
+  init(row: Row) throws {
+    itemID = row["item_id"]
+    type = row["type"]
+    value = row["value"]
+    size = row["size"]
+    payloadHash = row["payload_hash"]
   }
 }
 
@@ -50,7 +131,12 @@ final class ArchiveDatabase {
     )
 
     let pool = try DatabasePool(path: url.path, configuration: makeConfiguration())
-    try pool.write { db in
+    try pool.writeWithoutTransaction { db in
+      let hasSchema = try (Int.fetchOne(db, sql: Self.schemaTableCountSQL) ?? 0) > 0
+      if !hasSchema {
+        try db.execute(sql: "PRAGMA auto_vacuum = INCREMENTAL")
+        try db.execute(sql: "VACUUM")
+      }
       _ = try String.fetchOne(db, sql: "PRAGMA journal_mode = WAL")
     }
     try makeMigrator().migrate(pool)
@@ -78,6 +164,55 @@ final class ArchiveDatabase {
     }
   }
 
+  @MainActor
+  func importLegacyHistory(from store: LegacyHistoryStore = SwiftDataHistoryStore()) throws -> ArchiveImportReport {
+    let items = try store.loadAll()
+    return try importLegacyHistoryItems(items)
+  }
+
+  @MainActor
+  func importLegacyHistoryItems(_ items: [HistoryItem]) throws -> ArchiveImportReport {
+    var report = ArchiveImportReport(itemsSeen: items.count)
+    var pinPosition = 0
+
+    try pool.write { db in
+      for (itemIndex, item) in items.enumerated() {
+        report.representationsSeen += item.contents.count
+
+        do {
+          try Self.insertLegacyItem(
+            item,
+            itemIndex: itemIndex,
+            pinPosition: &pinPosition,
+            report: &report,
+            db: db
+          )
+        } catch {
+          report.errors.append(ArchiveImportError(
+            itemIndex: itemIndex,
+            contentIndex: nil,
+            reason: error.localizedDescription
+          ))
+        }
+      }
+    }
+
+    return report
+  }
+
+  func archiveSnapshot() throws -> ArchiveSnapshot {
+    try pool.read { db in
+      var items = try ArchiveItemSnapshot.fetchAll(db, sql: Self.archiveItemsSQL)
+      let representations = try ArchiveRepresentationSnapshot.fetchAll(db, sql: Self.archiveRepresentationsSQL)
+
+      for index in items.indices {
+        items[index].representations = representations.filter { $0.itemID == items[index].id }
+      }
+
+      return ArchiveSnapshot(items: items)
+    }
+  }
+
   private static func makeConfiguration() -> Configuration {
     var configuration = Configuration()
     configuration.foreignKeysEnabled = true
@@ -86,7 +221,6 @@ final class ArchiveDatabase {
       try db.execute(sql: "PRAGMA foreign_keys = ON")
       try db.execute(sql: "PRAGMA synchronous = NORMAL")
       try db.execute(sql: "PRAGMA busy_timeout = 1000")
-      try db.execute(sql: "PRAGMA auto_vacuum = INCREMENTAL")
     }
     return configuration
   }
@@ -95,6 +229,14 @@ final class ArchiveDatabase {
     var migrator = DatabaseMigrator()
     migrator.registerMigration("v1_archive_schema", foreignKeyChecks: .immediate) { db in
       try createInitialSchema(db)
+    }
+    migrator.registerMigration("v2_import_metadata", foreignKeyChecks: .immediate) { db in
+      if try !clipboardRepresentationsHavePayloadHash(db) {
+        try db.execute(sql: "ALTER TABLE clipboard_representations ADD COLUMN payload_hash TEXT")
+      }
+      if try !pinsHaveKey(db) {
+        try db.execute(sql: "ALTER TABLE pins ADD COLUMN key TEXT")
+      }
     }
     return migrator
   }
@@ -105,6 +247,141 @@ final class ArchiveDatabase {
     }
   }
 
+  private static func insertLegacyItem(
+    _ item: HistoryItem,
+    itemIndex: Int,
+    pinPosition: inout Int,
+    report: inout ArchiveImportReport,
+    db: Database
+  ) throws {
+    let sourceAppID = try upsertSourceApp(item.application, db: db)
+    let itemID = try insertClipboardItem(item, sourceAppID: sourceAppID, db: db)
+
+    for (contentIndex, content) in item.contents.enumerated() {
+      guard let value = content.value else {
+        report.errors.append(ArchiveImportError(
+          itemIndex: itemIndex,
+          contentIndex: contentIndex,
+          reason: "HistoryItemContent value is nil"
+        ))
+        continue
+      }
+
+      do {
+        try insertRepresentation(content, value: value, itemID: itemID, db: db)
+        report.representationsImported += 1
+      } catch {
+        report.errors.append(ArchiveImportError(
+          itemIndex: itemIndex,
+          contentIndex: contentIndex,
+          reason: error.localizedDescription
+        ))
+      }
+    }
+
+    try insertSearchDocument(for: item, itemID: itemID, db: db)
+    report.searchDocumentsImported += 1
+
+    if let pin = item.pin, !pin.isEmpty {
+      try insertPin(pin, item: item, itemID: itemID, position: pinPosition, db: db)
+      pinPosition += 1
+      report.pinsImported += 1
+    }
+
+    report.itemsImported += 1
+  }
+
+  private static func upsertSourceApp(_ bundleIdentifier: String?, db: Database) throws -> Int64? {
+    guard let bundleIdentifier, !bundleIdentifier.isEmpty else {
+      return nil
+    }
+
+    let sourceAppName = sourceAppName(for: bundleIdentifier)
+    try db.execute(
+      sql: """
+        INSERT INTO source_apps (bundle_identifier, name, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(bundle_identifier) DO UPDATE SET
+          name = excluded.name,
+          updated_at = excluded.updated_at
+      """,
+      arguments: [bundleIdentifier, sourceAppName, archiveTimestamp(Date())]
+    )
+
+    return try Int64.fetchOne(
+      db,
+      sql: "SELECT id FROM source_apps WHERE bundle_identifier = ?",
+      arguments: [bundleIdentifier]
+    )
+  }
+
+  private static func insertClipboardItem(_ item: HistoryItem, sourceAppID: Int64?, db: Database) throws -> Int64 {
+    try db.execute(
+      sql: """
+        INSERT INTO clipboard_items (
+          source_app_id,
+          item_hash,
+          title,
+          first_seen_at,
+          last_seen_at,
+          change_count
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+      """,
+      arguments: [
+        sourceAppID,
+        itemHash(for: item.contents),
+        item.title,
+        archiveTimestamp(item.firstCopiedAt),
+        archiveTimestamp(item.lastCopiedAt),
+        item.numberOfCopies,
+      ]
+    )
+
+    return db.lastInsertedRowID
+  }
+
+  private static func insertRepresentation(
+    _ content: HistoryItemContent,
+    value: Data,
+    itemID: Int64,
+    db: Database
+  ) throws {
+    try db.execute(
+      sql: """
+        INSERT INTO clipboard_representations (item_id, type, value, size, payload_hash)
+        VALUES (?, ?, ?, ?, ?)
+      """,
+      arguments: [itemID, content.type, value, value.count, payloadHash(for: value)]
+    )
+  }
+
+  private static func insertSearchDocument(for item: HistoryItem, itemID: Int64, db: Database) throws {
+    try db.execute(
+      sql: """
+        INSERT INTO clipboard_search_docs (item_id, title, text)
+        VALUES (?, ?, ?)
+      """,
+      arguments: [itemID, item.title, item.previewableText]
+    )
+  }
+
+  private static func insertPin(
+    _ pin: String,
+    item: HistoryItem,
+    itemID: Int64,
+    position: Int,
+    db: Database
+  ) throws {
+    try db.execute(
+      sql: """
+        INSERT INTO pins (item_id, position, title, key)
+        VALUES (?, ?, ?, ?)
+      """,
+      arguments: [itemID, position, item.title, pin]
+    )
+  }
+
   private static func checkFTS5Availability(_ db: Database) -> Bool {
     do {
       try db.execute(sql: "CREATE VIRTUAL TABLE temp.__maccy_fts5_smoke USING fts5(content)")
@@ -113,6 +390,64 @@ final class ArchiveDatabase {
     } catch {
       return false
     }
+  }
+
+  private static func clipboardRepresentationsHavePayloadHash(_ db: Database) throws -> Bool {
+    try String.fetchAll(db, sql: "SELECT name FROM pragma_table_info('clipboard_representations')")
+      .contains("payload_hash")
+  }
+
+  private static func pinsHaveKey(_ db: Database) throws -> Bool {
+    try String.fetchAll(db, sql: "SELECT name FROM pragma_table_info('pins')")
+      .contains("key")
+  }
+
+  private static func sourceAppName(for bundleIdentifier: String) -> String {
+    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+      let bundle = Bundle(url: url)
+      return bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String ??
+        url.deletingPathExtension().lastPathComponent
+    }
+
+    if bundleIdentifier.hasSuffix(".app") {
+      return URL(fileURLWithPath: bundleIdentifier).deletingPathExtension().lastPathComponent
+    }
+
+    return bundleIdentifier
+  }
+
+  private static func itemHash(for contents: [HistoryItemContent]) -> String {
+    let representationHashes = contents.map { content -> (type: String, valueHash: String, value: Data) in
+      let value = content.value ?? Data()
+      return (content.type, payloadHash(for: value), value)
+    }.sorted { lhs, rhs in
+      if lhs.type == rhs.type {
+        return lhs.valueHash < rhs.valueHash
+      }
+      return lhs.type < rhs.type
+    }
+
+    var data = Data()
+    for representationHash in representationHashes {
+      appendLengthPrefixed(Data(representationHash.type.utf8), to: &data)
+      appendLengthPrefixed(representationHash.value, to: &data)
+    }
+
+    return payloadHash(for: data)
+  }
+
+  private static func payloadHash(for data: Data) -> String {
+    Data(SHA256.hash(data: data)).map { String(format: "%02x", $0) }.joined()
+  }
+
+  private static func appendLengthPrefixed(_ value: Data, to data: inout Data) {
+    var length = UInt64(value.count).bigEndian
+    withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+    data.append(value)
+  }
+
+  private static func archiveTimestamp(_ date: Date) -> String {
+    archiveDateFormatter.string(from: date)
   }
 }
 
@@ -134,6 +469,13 @@ enum ArchiveDatabaseBootstrap {
   }
 }
 
+private let archiveDateFormatter: ISO8601DateFormatter = {
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  formatter.timeZone = TimeZone(secondsFromGMT: 0)
+  return formatter
+}()
+
 private extension ArchiveDatabase {
   static let schemaTablesSQL = """
     SELECT name
@@ -141,6 +483,42 @@ private extension ArchiveDatabase {
     WHERE type = 'table'
       AND name NOT LIKE 'sqlite_%'
     ORDER BY name
+    """
+
+  static let schemaTableCountSQL = """
+    SELECT COUNT(*)
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name NOT LIKE 'sqlite_%'
+    """
+
+  static let archiveItemsSQL = """
+    SELECT
+      clipboard_items.id,
+      source_apps.bundle_identifier AS source_app_bundle_identifier,
+      source_apps.name AS source_app_name,
+      clipboard_items.item_hash,
+      clipboard_items.title,
+      clipboard_items.first_seen_at,
+      clipboard_items.last_seen_at,
+      clipboard_items.change_count,
+      clipboard_items.deleted_at,
+      pins.position AS pin_position,
+      pins.key AS pin_key,
+      pins.title AS pin_title,
+      clipboard_search_docs.title AS search_title,
+      clipboard_search_docs.text AS search_text
+    FROM clipboard_items
+    LEFT JOIN source_apps ON source_apps.id = clipboard_items.source_app_id
+    LEFT JOIN pins ON pins.item_id = clipboard_items.id
+    LEFT JOIN clipboard_search_docs ON clipboard_search_docs.item_id = clipboard_items.id
+    ORDER BY clipboard_items.id
+    """
+
+  static let archiveRepresentationsSQL = """
+    SELECT item_id, type, value, size, payload_hash
+    FROM clipboard_representations
+    ORDER BY item_id, id
     """
 
   static let initialSchemaStatements = [

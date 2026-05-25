@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import Maccy
@@ -55,5 +56,201 @@ final class ArchiveDatabaseTests: XCTestCase {
     let health = try database.healthCheck()
 
     XCTAssertTrue(health.fts5Available)
+  }
+
+  @MainActor
+  func testImportsLegacyTextItemWithMetadataPinHashesAndSearchDocument() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let item = historyItem(
+      title: "Pinned note",
+      contents: [content(.string, "hello archive".data(using: .utf8)!)]
+    )
+    item.application = "com.example.TextEditor"
+    item.firstCopiedAt = Date(timeIntervalSince1970: 100)
+    item.lastCopiedAt = Date(timeIntervalSince1970: 200)
+    item.numberOfCopies = 7
+    item.pin = "f"
+    let store = RecordingLegacyHistoryStore(items: [item])
+
+    let report = try database.importLegacyHistory(from: store)
+    let snapshot = try database.archiveSnapshot()
+
+    XCTAssertEqual(report.itemsSeen, 1)
+    XCTAssertEqual(report.itemsImported, 1)
+    XCTAssertEqual(report.representationsSeen, 1)
+    XCTAssertEqual(report.representationsImported, 1)
+    XCTAssertEqual(report.pinsImported, 1)
+    XCTAssertEqual(report.searchDocumentsImported, 1)
+    XCTAssertEqual(report.errorCount, 0)
+    XCTAssertEqual(store.loadAllCallCount, 1)
+    XCTAssertEqual(store.deleteCallCount, 0)
+    XCTAssertEqual(store.deleteAllCallCount, 0)
+
+    let archivedItem = try XCTUnwrap(snapshot.items.first)
+    XCTAssertEqual(archivedItem.sourceAppBundleIdentifier, "com.example.TextEditor")
+    XCTAssertEqual(archivedItem.sourceAppName, "com.example.TextEditor")
+    XCTAssertEqual(archivedItem.title, "Pinned note")
+    XCTAssertEqual(archivedItem.firstSeenAt, "1970-01-01T00:01:40.000Z")
+    XCTAssertEqual(archivedItem.lastSeenAt, "1970-01-01T00:03:20.000Z")
+    XCTAssertEqual(archivedItem.changeCount, 7)
+    XCTAssertEqual(archivedItem.pinPosition, 0)
+    XCTAssertEqual(archivedItem.pinKey, "f")
+    XCTAssertEqual(archivedItem.pinTitle, "Pinned note")
+    XCTAssertEqual(archivedItem.searchTitle, "Pinned note")
+    XCTAssertEqual(archivedItem.searchText, "hello archive")
+    XCTAssertNotNil(archivedItem.itemHash)
+
+    let representation = try XCTUnwrap(archivedItem.representations.first)
+    XCTAssertEqual(representation.type, NSPasteboard.PasteboardType.string.rawValue)
+    XCTAssertEqual(representation.value, "hello archive".data(using: .utf8))
+    XCTAssertEqual(representation.size, 13)
+    XCTAssertNotNil(representation.payloadHash)
+  }
+
+  @MainActor
+  func testImportsRTFHTMLImageAndFileURLRepresentations() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let rtfData = try XCTUnwrap(NSAttributedString(string: "rich text").rtf(
+      from: NSRange(location: 0, length: 9),
+      documentAttributes: [:]
+    ))
+    let htmlData = try XCTUnwrap("<strong>web text</strong>".data(using: .utf8))
+    let imageData = try XCTUnwrap(imageData())
+    let fileURLData = URL(fileURLWithPath: "/tmp/archive.txt").dataRepresentation
+    let item = historyItem(
+      title: "Mixed item",
+      contents: [
+        content(.rtf, rtfData),
+        content(.html, htmlData),
+        content(.png, imageData),
+        content(.fileURL, fileURLData),
+      ]
+    )
+
+    let report = try database.importLegacyHistoryItems([item])
+    let archivedItem = try XCTUnwrap(database.archiveSnapshot().items.first)
+
+    XCTAssertEqual(report.itemsImported, 1)
+    XCTAssertEqual(report.representationsImported, 4)
+    XCTAssertEqual(report.errorCount, 0)
+    XCTAssertEqual(Set(archivedItem.representations.map(\.type)), Set([
+      NSPasteboard.PasteboardType.rtf.rawValue,
+      NSPasteboard.PasteboardType.html.rawValue,
+      NSPasteboard.PasteboardType.png.rawValue,
+      NSPasteboard.PasteboardType.fileURL.rawValue,
+    ]))
+    XCTAssertEqual(representation(.rtf, in: archivedItem)?.value, rtfData)
+    XCTAssertEqual(representation(.html, in: archivedItem)?.value, htmlData)
+    XCTAssertEqual(representation(.png, in: archivedItem)?.value, imageData)
+    XCTAssertEqual(representation(.fileURL, in: archivedItem)?.value, fileURLData)
+    XCTAssertTrue(archivedItem.representations.allSatisfy { $0.payloadHash != nil })
+  }
+
+  @MainActor
+  func testImportReportsNilContentErrorsWithoutDroppingLegacyRows() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let item = historyItem(
+      title: "Partial item",
+      contents: [
+        HistoryItemContent(type: NSPasteboard.PasteboardType.string.rawValue, value: nil),
+        content(.html, "<p>kept</p>".data(using: .utf8)!),
+      ]
+    )
+    let store = RecordingLegacyHistoryStore(items: [item])
+
+    let report = try database.importLegacyHistory(from: store)
+    let snapshot = try database.archiveSnapshot()
+
+    XCTAssertEqual(report.itemsSeen, 1)
+    XCTAssertEqual(report.itemsImported, 1)
+    XCTAssertEqual(report.representationsSeen, 2)
+    XCTAssertEqual(report.representationsImported, 1)
+    XCTAssertEqual(report.errorCount, 1)
+    XCTAssertEqual(report.errors.first?.contentIndex, 0)
+    XCTAssertEqual(snapshot.itemCount, 1)
+    XCTAssertEqual(snapshot.representationCount, 1)
+    XCTAssertEqual(store.items.count, 1)
+    XCTAssertEqual(store.deleteCallCount, 0)
+    XCTAssertEqual(store.deleteAllCallCount, 0)
+  }
+
+  private func historyItem(title: String, contents: [HistoryItemContent]) -> HistoryItem {
+    let item = HistoryItem(contents: contents)
+    item.title = title
+    return item
+  }
+
+  private func content(_ type: NSPasteboard.PasteboardType, _ value: Data) -> HistoryItemContent {
+    HistoryItemContent(type: type.rawValue, value: value)
+  }
+
+  private func imageData() -> Data? {
+    let rep = NSBitmapImageRep(
+      bitmapDataPlanes: nil,
+      pixelsWide: 2,
+      pixelsHigh: 2,
+      bitsPerSample: 8,
+      samplesPerPixel: 4,
+      hasAlpha: true,
+      isPlanar: false,
+      colorSpaceName: .deviceRGB,
+      bytesPerRow: 0,
+      bitsPerPixel: 0
+    )
+    return rep?.representation(using: .png, properties: [:])
+  }
+
+  private func representation(
+    _ type: NSPasteboard.PasteboardType,
+    in item: ArchiveItemSnapshot
+  ) -> ArchiveRepresentationSnapshot? {
+    item.representations.first { $0.type == type.rawValue }
+  }
+}
+
+@MainActor
+private final class RecordingLegacyHistoryStore: LegacyHistoryStore {
+  private(set) var items: [HistoryItem]
+  private(set) var loadAllCallCount = 0
+  private(set) var deleteCallCount = 0
+  private(set) var deleteAllCallCount = 0
+
+  init(items: [HistoryItem]) {
+    self.items = items
+  }
+
+  func loadAll() throws -> [HistoryItem] {
+    loadAllCallCount += 1
+    return items
+  }
+
+  func loadDuplicateCandidates(for item: HistoryItem) throws -> [HistoryItem] {
+    items.filter { $0 !== item }
+  }
+
+  func insert(_ item: HistoryItem) throws {
+    items.append(item)
+  }
+
+  func delete(_ item: HistoryItem) throws {
+    deleteCallCount += 1
+    items.removeAll { $0 === item }
+  }
+
+  func deleteUnpinned() throws {
+    items.removeAll { $0.pin == nil }
+  }
+
+  func deleteAll() throws {
+    deleteAllCallCount += 1
+    items.removeAll()
+  }
+
+  func countItems() throws -> Int {
+    items.count
+  }
+
+  func countContents() throws -> Int {
+    items.reduce(0) { $0 + $1.contents.count }
   }
 }
