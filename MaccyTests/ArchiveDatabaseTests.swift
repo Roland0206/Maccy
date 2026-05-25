@@ -174,10 +174,92 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertEqual(store.deleteAllCallCount, 0)
   }
 
+  @MainActor
+  func testRecentPagesUseStableKeysetCursorWhileNewRowsExist() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Oldest", text: "oldest", lastCopiedAt: 100),
+      historyItem(title: "Middle", text: "middle", lastCopiedAt: 200),
+      historyItem(title: "Newest", text: "newest", lastCopiedAt: 300),
+    ])
+
+    let firstPage = try database.firstRecentPage(limit: 2)
+    let cursor = try XCTUnwrap(firstPage.nextCursor)
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Newer", text: "newer", lastCopiedAt: 400),
+      historyItem(title: "Same Time New ID", text: "same", lastCopiedAt: 200),
+    ])
+
+    let nextPage = try database.recentPage(after: cursor, limit: 2)
+
+    XCTAssertEqual(itemTitles(firstPage.items), ["Newest", "Middle"])
+    XCTAssertTrue(firstPage.hasMore)
+    XCTAssertEqual(itemTitles(nextPage.items), ["Oldest"])
+    XCTAssertFalse(nextPage.hasMore)
+    XCTAssertEqual(nextPage.items.first?.representations.count, 1)
+  }
+
+  @MainActor
+  func testPinnedItemsAreLoadedSeparatelyFromRecentUnpinnedItems() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Pinned", text: "pinned", lastCopiedAt: 300, pin: "p"),
+      historyItem(title: "Recent", text: "recent", lastCopiedAt: 200),
+      historyItem(title: "Deleted Recent", text: "deleted", lastCopiedAt: 500),
+      historyItem(title: "Deleted Pinned", text: "deleted pinned", lastCopiedAt: 400, pin: "r"),
+    ])
+    let snapshot = try database.archiveSnapshot()
+    try database.softDeleteItem(id: itemID(titled: "Deleted Recent", in: snapshot))
+    try database.softDeleteItem(id: itemID(titled: "Deleted Pinned", in: snapshot))
+
+    let pinnedItems = try database.pinnedItems()
+    let recentPage = try database.firstRecentPage(limit: 10)
+
+    XCTAssertEqual(itemTitles(pinnedItems), ["Pinned"])
+    XCTAssertEqual(pinnedItems.first?.pinKey, "p")
+    XCTAssertEqual(itemTitles(recentPage.items), ["Recent"])
+    XCTAssertFalse(recentPage.hasMore)
+  }
+
+  func testRecentPageQueryPlanUsesRecentIndex() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+
+    let plan = try database.recentPageQueryPlan()
+
+    XCTAssertTrue(
+      plan.contains { $0.contains("clipboard_items_recent_not_deleted_index") },
+      plan.joined(separator: "\n")
+    )
+  }
+
   private func historyItem(title: String, contents: [HistoryItemContent]) -> HistoryItem {
     let item = HistoryItem(contents: contents)
     item.title = title
     return item
+  }
+
+  private func historyItem(
+    title: String,
+    text: String,
+    lastCopiedAt: TimeInterval,
+    pin: String? = nil
+  ) -> HistoryItem {
+    let item = historyItem(
+      title: title,
+      contents: [content(.string, Data(text.utf8))]
+    )
+    item.firstCopiedAt = Date(timeIntervalSince1970: lastCopiedAt - 1)
+    item.lastCopiedAt = Date(timeIntervalSince1970: lastCopiedAt)
+    item.pin = pin
+    return item
+  }
+
+  private func itemTitles(_ items: [ArchiveItemSnapshot]) -> [String] {
+    items.map { $0.title ?? "" }
+  }
+
+  private func itemID(titled title: String, in snapshot: ArchiveSnapshot) throws -> Int64 {
+    try XCTUnwrap(snapshot.items.first { $0.title == title }?.id)
   }
 
   private func content(_ type: NSPasteboard.PasteboardType, _ value: Data) -> HistoryItemContent {
