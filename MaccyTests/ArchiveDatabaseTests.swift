@@ -117,11 +117,83 @@ final class ArchiveDatabaseTests: XCTestCase {
 
     XCTAssertEqual(report.representationsImported, 1)
     XCTAssertEqual(representation.storageKind, .external)
-    XCTAssertEqual(representation.value, Data())
+    XCTAssertEqual(representation.value, data)
     XCTAssertEqual(representation.size, data.count)
     XCTAssertEqual(representation.payloadHash, ArchivePayloadStore.payloadHash(for: data))
     XCTAssertEqual(relativePath, ArchivePayloadStore.relativePath(forHash: ArchivePayloadStore.payloadHash(for: data)))
     XCTAssertEqual(try payloadStore.read(relativePath: relativePath), data)
+  }
+
+  @MainActor
+  func testListQueriesLoadRepresentationMetadataWithoutPayloadBytes() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 10
+    )
+    let smallData = Data("small".utf8)
+    let largeData = Data("large payload".utf8)
+
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Pinned Large", contents: [content(.string, largeData)], pin: "p"),
+      historyItem(title: "Recent Small", contents: [content(.string, smallData)]),
+    ])
+
+    let pinnedRepresentation = try XCTUnwrap(database.pinnedItems().first?.representations.first)
+    let recentRepresentation = try XCTUnwrap(database.firstRecentPage(limit: 10).items.first?.representations.first)
+
+    XCTAssertEqual(pinnedRepresentation.storageKind, .external)
+    XCTAssertEqual(pinnedRepresentation.value, Data())
+    XCTAssertEqual(pinnedRepresentation.size, largeData.count)
+    XCTAssertTrue(pinnedRepresentation.hasPayload)
+    XCTAssertEqual(recentRepresentation.storageKind, .inline)
+    XCTAssertEqual(recentRepresentation.value, Data())
+    XCTAssertEqual(recentRepresentation.size, smallData.count)
+    XCTAssertTrue(recentRepresentation.hasPayload)
+  }
+
+  @MainActor
+  func testArchivePopupHistoryStoreMaterializesExternalPayloadForSelection() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let data = Data("materialized external payload".utf8)
+    try database.importLegacyHistoryItems([
+      historyItem(title: "External", contents: [content(.string, data)]),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+    let row = try XCTUnwrap(store.loadInitialRows(recentLimit: 1).recentRows.first)
+
+    let item = try store.materialize(row)
+
+    XCTAssertEqual(item.contents.first?.value, data)
+    XCTAssertEqual(item.text, String(data: data, encoding: .utf8))
+  }
+
+  @MainActor
+  func testMissingExternalPayloadFileThrowsExplicitError() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let data = Data("missing external payload".utf8)
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Missing", contents: [content(.string, data)]),
+    ])
+    let snapshot = try database.archiveSnapshot()
+    let itemID = try XCTUnwrap(snapshot.items.first?.id)
+    let relativePath = try XCTUnwrap(snapshot.items.first?.representations.first?.relativePath)
+    try FileManager.default.removeItem(at: payloadStore.fileURL(forRelativePath: relativePath))
+
+    XCTAssertThrowsError(try database.item(id: itemID)) { error in
+      XCTAssertEqual(error as? ArchivePayloadStoreError, .missingExternalFile(relativePath: relativePath))
+    }
   }
 
   @MainActor
@@ -589,9 +661,14 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertTrue(try database.archiveSnapshot().items.allSatisfy { $0.deletedAt != nil })
   }
 
-  private func historyItem(title: String, contents: [HistoryItemContent]) -> HistoryItem {
+  private func historyItem(
+    title: String,
+    contents: [HistoryItemContent],
+    pin: String? = nil
+  ) -> HistoryItem {
     let item = HistoryItem(contents: contents)
     item.title = title
+    item.pin = pin
     return item
   }
 

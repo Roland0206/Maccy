@@ -145,6 +145,20 @@ enum ArchivePayloadStorageKind: String, Hashable {
   case external
 }
 
+enum ArchivePayloadStoreError: LocalizedError, Equatable {
+  case missingExternalPath(type: String)
+  case missingExternalFile(relativePath: String)
+
+  var errorDescription: String? {
+    switch self {
+    case .missingExternalPath(let type):
+      return "External payload path is missing for \(type)"
+    case .missingExternalFile(let relativePath):
+      return "External payload file is missing at \(relativePath)"
+    }
+  }
+}
+
 struct ArchiveRepresentationSnapshot: Equatable, FetchableRecord {
   let itemID: Int64
   let type: String
@@ -154,6 +168,10 @@ struct ArchiveRepresentationSnapshot: Equatable, FetchableRecord {
   let storageKind: ArchivePayloadStorageKind
   let relativePath: String?
 
+  var hasPayload: Bool {
+    payloadHash != nil || relativePath != nil || !value.isEmpty || size == 0
+  }
+
   init(row: Row) throws {
     itemID = row["item_id"]
     type = row["type"]
@@ -162,6 +180,41 @@ struct ArchiveRepresentationSnapshot: Equatable, FetchableRecord {
     payloadHash = row["payload_hash"]
     storageKind = ArchivePayloadStorageKind(rawValue: row["storage_kind"] ?? "") ?? .inline
     relativePath = row["relative_path"]
+  }
+
+  init(
+    itemID: Int64,
+    type: String,
+    value: Data,
+    size: Int,
+    payloadHash: String?,
+    storageKind: ArchivePayloadStorageKind,
+    relativePath: String?
+  ) {
+    self.itemID = itemID
+    self.type = type
+    self.value = value
+    self.size = size
+    self.payloadHash = payloadHash
+    self.storageKind = storageKind
+    self.relativePath = relativePath
+  }
+
+  func resolvingPayload(with payloadStore: ArchivePayloadStore) throws -> ArchiveRepresentationSnapshot {
+    guard storageKind == .external else { return self }
+    guard let relativePath else {
+      throw ArchivePayloadStoreError.missingExternalPath(type: type)
+    }
+
+    return ArchiveRepresentationSnapshot(
+      itemID: itemID,
+      type: type,
+      value: try payloadStore.read(relativePath: relativePath),
+      size: size,
+      payloadHash: payloadHash,
+      storageKind: storageKind,
+      relativePath: relativePath
+    )
   }
 }
 
@@ -193,7 +246,12 @@ struct ArchivePayloadStore {
   }
 
   func read(relativePath: String) throws -> Data {
-    try Data(contentsOf: fileURL(forRelativePath: relativePath))
+    let fileURL = fileURL(forRelativePath: relativePath)
+    guard FileManager.default.fileExists(atPath: fileURL.path) else {
+      throw ArchivePayloadStoreError.missingExternalFile(relativePath: relativePath)
+    }
+
+    return try Data(contentsOf: fileURL)
   }
 
   func fileURL(forRelativePath relativePath: String) -> URL {
@@ -353,7 +411,11 @@ final class ArchiveDatabase {
 
   func archiveSnapshot() throws -> ArchiveSnapshot {
     try pool.read { db in
-      ArchiveSnapshot(items: try Self.fetchArchiveItems(db, sql: Self.archiveItemsSQL))
+      ArchiveSnapshot(items: try Self.fetchArchiveItems(
+        db,
+        sql: Self.archiveItemsSQL,
+        payloadStore: payloadStore
+      ))
     }
   }
 
@@ -367,7 +429,11 @@ final class ArchiveDatabase {
 
   func pinnedItems() throws -> [ArchiveItemSnapshot] {
     try pool.read { db in
-      try Self.fetchArchiveItems(db, sql: Self.pinnedItemsSQL)
+      try Self.fetchArchiveItems(
+        db,
+        sql: Self.pinnedItemsSQL,
+        includePayloads: false
+      )
     }
   }
 
@@ -376,7 +442,8 @@ final class ArchiveDatabase {
       try Self.fetchArchiveItems(
         db,
         sql: Self.archiveItemByIDSQL,
-        arguments: [id]
+        arguments: [id],
+        payloadStore: payloadStore
       ).first
     }
   }
@@ -604,7 +671,8 @@ final class ArchiveDatabase {
       var items = try Self.fetchArchiveItems(
         db,
         sql: Self.recentItemsSQL(hasCursor: cursor != nil),
-        arguments: arguments
+        arguments: arguments,
+        includePayloads: false
       )
       let hasMore = items.count > limit
       if hasMore {
@@ -621,10 +689,17 @@ final class ArchiveDatabase {
   private static func fetchArchiveItems(
     _ db: Database,
     sql: String,
-    arguments: StatementArguments = []
+    arguments: StatementArguments = [],
+    includePayloads: Bool = true,
+    payloadStore: ArchivePayloadStore? = nil
   ) throws -> [ArchiveItemSnapshot] {
     var items = try fetchArchiveItemSummaries(db, sql: sql, arguments: arguments)
-    try attachRepresentations(to: &items, db: db)
+    try attachRepresentations(
+      to: &items,
+      includePayloads: includePayloads,
+      payloadStore: payloadStore,
+      db: db
+    )
     return items
   }
 
@@ -636,21 +711,32 @@ final class ArchiveDatabase {
     try ArchiveItemSnapshot.fetchAll(db, sql: sql, arguments: arguments)
   }
 
-  private static func attachRepresentations(to items: inout [ArchiveItemSnapshot], db: Database) throws {
+  private static func attachRepresentations(
+    to items: inout [ArchiveItemSnapshot],
+    includePayloads: Bool,
+    payloadStore: ArchivePayloadStore?,
+    db: Database
+  ) throws {
     guard !items.isEmpty else { return }
 
     let itemIDs = items.map(\.id)
     let placeholders = Array(repeating: "?", count: itemIDs.count).joined(separator: ", ")
-    let representations = try ArchiveRepresentationSnapshot.fetchAll(
+    let valueSQL = includePayloads ? "value" : "CAST('' AS BLOB) AS value"
+    var representations = try ArchiveRepresentationSnapshot.fetchAll(
       db,
       sql: """
-        SELECT item_id, type, value, size, payload_hash, storage_kind, relative_path
+        SELECT item_id, type, \(valueSQL), size, payload_hash, storage_kind, relative_path
         FROM clipboard_representations
         WHERE item_id IN (\(placeholders))
         ORDER BY item_id, id
         """,
       arguments: StatementArguments(itemIDs)
     )
+
+    if includePayloads, let payloadStore {
+      representations = try representations.map { try $0.resolvingPayload(with: payloadStore) }
+    }
+
     let representationsByItemID = Dictionary(grouping: representations, by: \.itemID)
 
     for index in items.indices {
