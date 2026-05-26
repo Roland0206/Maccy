@@ -76,6 +76,76 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertEqual(try store.read(relativePath: firstPayload.relativePath), data)
   }
 
+  @MainActor
+  func testImportsSmallPayloadInlineWhenWithinThreshold() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 10
+    )
+    let data = Data("small".utf8)
+
+    let report = try database.importLegacyHistoryItems([
+      historyItem(title: "Small", contents: [content(.string, data)]),
+    ])
+    let representation = try XCTUnwrap(database.archiveSnapshot().items.first?.representations.first)
+
+    XCTAssertEqual(report.representationsImported, 1)
+    XCTAssertEqual(representation.storageKind, .inline)
+    XCTAssertEqual(representation.value, data)
+    XCTAssertEqual(representation.size, data.count)
+    XCTAssertNil(representation.relativePath)
+    XCTAssertEqual(try payloadFileCount(in: payloadStore.rootDirectory), 0)
+  }
+
+  @MainActor
+  func testImportsLargePayloadExternallyWhenAboveThreshold() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 4
+    )
+    let data = Data("large payload".utf8)
+
+    let report = try database.importLegacyHistoryItems([
+      historyItem(title: "Large", contents: [content(.string, data)]),
+    ])
+    let representation = try XCTUnwrap(database.archiveSnapshot().items.first?.representations.first)
+    let relativePath = try XCTUnwrap(representation.relativePath)
+
+    XCTAssertEqual(report.representationsImported, 1)
+    XCTAssertEqual(representation.storageKind, .external)
+    XCTAssertEqual(representation.value, Data())
+    XCTAssertEqual(representation.size, data.count)
+    XCTAssertEqual(representation.payloadHash, ArchivePayloadStore.payloadHash(for: data))
+    XCTAssertEqual(relativePath, ArchivePayloadStore.relativePath(forHash: ArchivePayloadStore.payloadHash(for: data)))
+    XCTAssertEqual(try payloadStore.read(relativePath: relativePath), data)
+  }
+
+  @MainActor
+  func testImportDeduplicatesExternalPayloadFilesByHash() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let data = Data("shared large payload".utf8)
+
+    let report = try database.importLegacyHistoryItems([
+      historyItem(title: "First", contents: [content(.string, data)]),
+      historyItem(title: "Second", contents: [content(.string, data)]),
+    ])
+    let representations = try database.archiveSnapshot().items.flatMap(\.representations)
+
+    XCTAssertEqual(report.representationsImported, 2)
+    XCTAssertEqual(Set(representations.map(\.storageKind)), [.external])
+    XCTAssertEqual(Set(representations.compactMap(\.relativePath)).count, 1)
+    XCTAssertEqual(try payloadFileCount(in: payloadStore.rootDirectory), 1)
+  }
+
   func testFTS5CapabilitySmokeTest() throws {
     let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
     let health = try database.healthCheck()
@@ -551,6 +621,24 @@ final class ArchiveDatabaseTests: XCTestCase {
 
   private func content(_ type: NSPasteboard.PasteboardType, _ value: Data) -> HistoryItemContent {
     HistoryItemContent(type: type.rawValue, value: value)
+  }
+
+  private func payloadFileCount(in directory: URL) throws -> Int {
+    guard let enumerator = FileManager.default.enumerator(
+      at: directory,
+      includingPropertiesForKeys: [.isDirectoryKey]
+    ) else {
+      return 0
+    }
+
+    var count = 0
+    for case let fileURL as URL in enumerator {
+      let values = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
+      if values.isDirectory == false {
+        count += 1
+      }
+    }
+    return count
   }
 
   private func imageData() -> Data? {

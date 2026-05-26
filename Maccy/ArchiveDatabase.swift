@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import Defaults
 import Foundation
 import GRDB
 
@@ -139,7 +140,7 @@ struct ArchiveItemSnapshot: Equatable, FetchableRecord {
   }
 }
 
-enum ArchivePayloadStorageKind: String, Equatable {
+enum ArchivePayloadStorageKind: String, Hashable {
   case inline
   case external
 }
@@ -251,12 +252,24 @@ final class ArchiveDatabase {
   static let defaultURL = URL.applicationSupportDirectory.appending(path: "Maccy/Archive.sqlite")
 
   private let pool: DatabasePool
+  private let payloadStore: ArchivePayloadStore
+  private let inlinePayloadThresholdBytes: Int
 
-  private init(pool: DatabasePool) {
+  private init(
+    pool: DatabasePool,
+    payloadStore: ArchivePayloadStore,
+    inlinePayloadThresholdBytes: Int
+  ) {
     self.pool = pool
+    self.payloadStore = payloadStore
+    self.inlinePayloadThresholdBytes = inlinePayloadThresholdBytes
   }
 
-  static func open(at url: URL = defaultURL) throws -> ArchiveDatabase {
+  static func open(
+    at url: URL = defaultURL,
+    payloadStore: ArchivePayloadStore = ArchivePayloadStore(),
+    inlinePayloadThresholdBytes: Int = Defaults[.archiveInlinePayloadThresholdBytes]
+  ) throws -> ArchiveDatabase {
     try FileManager.default.createDirectory(
       at: url.deletingLastPathComponent(),
       withIntermediateDirectories: true
@@ -272,7 +285,11 @@ final class ArchiveDatabase {
       _ = try String.fetchOne(db, sql: "PRAGMA journal_mode = WAL")
     }
     try makeMigrator().migrate(pool)
-    return ArchiveDatabase(pool: pool)
+    return ArchiveDatabase(
+      pool: pool,
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: inlinePayloadThresholdBytes
+    )
   }
 
   func healthCheck() throws -> ArchiveDatabaseHealth {
@@ -317,6 +334,8 @@ final class ArchiveDatabase {
             itemIndex: itemIndex,
             pinPosition: &pinPosition,
             report: &report,
+            payloadStore: payloadStore,
+            inlinePayloadThresholdBytes: inlinePayloadThresholdBytes,
             db: db
           )
         } catch {
@@ -814,6 +833,8 @@ final class ArchiveDatabase {
     itemIndex: Int,
     pinPosition: inout Int,
     report: inout ArchiveImportReport,
+    payloadStore: ArchivePayloadStore,
+    inlinePayloadThresholdBytes: Int,
     db: Database
   ) throws {
     let sourceAppID = try upsertSourceApp(item.application, db: db)
@@ -830,7 +851,14 @@ final class ArchiveDatabase {
       }
 
       do {
-        try insertRepresentation(content, value: value, itemID: itemID, db: db)
+        try insertRepresentation(
+          content,
+          value: value,
+          itemID: itemID,
+          payloadStore: payloadStore,
+          inlinePayloadThresholdBytes: inlinePayloadThresholdBytes,
+          db: db
+        )
         report.representationsImported += 1
       } catch {
         report.errors.append(ArchiveImportError(
@@ -907,8 +935,29 @@ final class ArchiveDatabase {
     _ content: HistoryItemContent,
     value: Data,
     itemID: Int64,
+    payloadStore: ArchivePayloadStore,
+    inlinePayloadThresholdBytes: Int,
     db: Database
   ) throws {
+    let threshold = max(inlinePayloadThresholdBytes, 0)
+    let payloadHash: String
+    let storedValue: Data
+    let storageKind: ArchivePayloadStorageKind
+    let relativePath: String?
+
+    if value.count <= threshold {
+      payloadHash = Self.payloadHash(for: value)
+      storedValue = value
+      storageKind = .inline
+      relativePath = nil
+    } else {
+      let externalPayload = try payloadStore.write(value)
+      payloadHash = externalPayload.hash
+      storedValue = Data()
+      storageKind = .external
+      relativePath = externalPayload.relativePath
+    }
+
     try db.execute(
       sql: """
         INSERT INTO clipboard_representations (
@@ -925,11 +974,11 @@ final class ArchiveDatabase {
       arguments: [
         itemID,
         content.type,
-        value,
+        storedValue,
         value.count,
-        payloadHash(for: value),
-        ArchivePayloadStorageKind.inline.rawValue,
-        nil,
+        payloadHash,
+        storageKind.rawValue,
+        relativePath,
       ]
     )
   }
