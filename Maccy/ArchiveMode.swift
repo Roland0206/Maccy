@@ -65,7 +65,23 @@ final class ArchiveModeViewModel {
   }
 
   var canActOnSelection: Bool {
-    selectedRow != nil && state != .loading
+    selectedRow != nil && state != .loading && !isLoadingPreview
+  }
+
+  var isSearching: Bool {
+    !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  var modeTitle: String {
+    isSearching ? "Search results" : "Recent archive"
+  }
+
+  var emptyStateTitle: String {
+    isSearching ? "No matches" : "Archive is empty"
+  }
+
+  var emptyStateDescription: String {
+    isSearching ? "Try another search term." : "Copied items will appear here when archive storage is enabled."
   }
 
   @ObservationIgnored private let store: (any ArchiveBrowsingStore)?
@@ -198,6 +214,11 @@ final class ArchiveModeViewModel {
 
   private func loadInitialSearchPage(query: String, store: any ArchiveBrowsingStore) async throws {
     let page = try await store.search(searchRequest(query: query, offset: 0))
+    try Task.checkCancellation()
+    guard self.query.trimmingCharacters(in: .whitespacesAndNewlines) == query else {
+      throw CancellationError()
+    }
+
     rows = page.rows
     nextRecentCursor = nil
     nextSearchOffset = page.nextOffset
@@ -213,6 +234,11 @@ final class ArchiveModeViewModel {
   private func loadNextSearchPage(query: String, store: any ArchiveBrowsingStore) async throws {
     guard let nextSearchOffset else { return }
     let page = try await store.search(searchRequest(query: query, offset: nextSearchOffset))
+    try Task.checkCancellation()
+    guard self.query.trimmingCharacters(in: .whitespacesAndNewlines) == query else {
+      throw CancellationError()
+    }
+
     appendRows(page.rows)
     self.nextSearchOffset = page.nextOffset
   }

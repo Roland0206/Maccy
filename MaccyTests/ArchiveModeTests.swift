@@ -32,6 +32,29 @@ final class ArchiveModeTests: XCTestCase {
     XCTAssertFalse(viewModel.hasMore)
   }
 
+  func testStaleSearchResponseDoesNotReplaceNewerResults() async {
+    let store = DelayedSearchArchiveBrowsingStore()
+    let viewModel = ArchiveModeViewModel(store: store, pageSize: 2)
+
+    viewModel.query = "old"
+    let oldTask = Task { await viewModel.loadFirstPage() }
+    await store.waitForSearch(query: "old")
+
+    viewModel.query = "new"
+    let newTask = Task { await viewModel.loadFirstPage() }
+    await store.waitForSearch(query: "new")
+
+    store.finishSearch(query: "new", rows: [row("new result")])
+    await newTask.value
+
+    XCTAssertEqual(viewModel.rows.map(\.title), ["new result"])
+
+    store.finishSearch(query: "old", rows: [row("old result")])
+    await oldTask.value
+
+    XCTAssertEqual(viewModel.rows.map(\.title), ["new result"])
+  }
+
   func testPreviewMaterializesOnlyAfterSelectionLoads() async {
     let store = FakeArchiveBrowsingStore(initialRows: [row("lazy")])
     let viewModel = ArchiveModeViewModel(store: store, pageSize: 10)
@@ -125,7 +148,9 @@ private final class FakeArchiveBrowsingStore: ArchiveBrowsingStore {
     recentRows.removeFirst(min(limit, recentRows.count))
     return PopupHistoryRecentPage(
       rows: rows,
-      nextCursor: recentRows.isEmpty ? nil : .archive(ArchiveRecentPageCursor(lastCopiedAt: "cursor", id: 2))
+      nextCursor: recentRows.isEmpty
+        ? nil
+        : .archive(ArchiveRecentPageCursor(lastCopiedAt: "cursor", id: 2))
     )
   }
 
@@ -146,4 +171,43 @@ private final class FakeArchiveBrowsingStore: ArchiveBrowsingStore {
   func setPin(_ row: PopupHistoryRow, pin: String?) throws {
     setPinCalls.append((row.id, pin))
   }
+}
+
+@MainActor
+private final class DelayedSearchArchiveBrowsingStore: ArchiveBrowsingStore {
+  private var continuations: [String: CheckedContinuation<PopupHistorySearchPage, Error>] = [:]
+
+  func waitForSearch(query: String) async {
+    while continuations[query] == nil {
+      await Task.yield()
+    }
+  }
+
+  func finishSearch(query: String, rows: [PopupHistoryRow], nextOffset: Int? = nil) {
+    continuations.removeValue(forKey: query)?.resume(
+      returning: PopupHistorySearchPage(rows: rows, nextOffset: nextOffset)
+    )
+  }
+
+  func loadInitialPage(limit: Int) throws -> ArchiveModePage {
+    ArchiveModePage(rows: [], nextRecentCursor: nil)
+  }
+
+  func loadMoreRecentRows(after cursor: PopupHistoryPageCursor, limit: Int) throws -> PopupHistoryRecentPage {
+    PopupHistoryRecentPage(rows: [], nextCursor: nil)
+  }
+
+  func search(_ request: ArchiveSearchRequest) async throws -> PopupHistorySearchPage {
+    try await withCheckedThrowingContinuation { continuation in
+      continuations[request.query] = continuation
+    }
+  }
+
+  func materialize(_ row: PopupHistoryRow) throws -> HistoryItem {
+    row.materializeLegacyItem()!
+  }
+
+  func delete(_ row: PopupHistoryRow) throws {}
+
+  func setPin(_ row: PopupHistoryRow, pin: String?) throws {}
 }
