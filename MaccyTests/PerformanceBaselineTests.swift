@@ -8,6 +8,7 @@ import XCTest
 
 @MainActor
 final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this type_body_length
+  private var savedPopupRecentPageSize = Defaults[.popupRecentPageSize]
   private var savedSearchMode = Defaults[.searchMode]
   private var savedSearchVisibility = Defaults[.searchVisibility]
   private var savedShowApplicationIcons = Defaults[.showApplicationIcons]
@@ -20,6 +21,7 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
 
   override func setUp() {
     super.setUp()
+    savedPopupRecentPageSize = Defaults[.popupRecentPageSize]
     savedSearchMode = Defaults[.searchMode]
     savedSearchVisibility = Defaults[.searchVisibility]
     savedShowApplicationIcons = Defaults[.showApplicationIcons]
@@ -30,6 +32,7 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
     savedSortBy = Defaults[.sortBy]
     savedWindowSize = Defaults[.windowSize]
 
+    Defaults[.popupRecentPageSize] = 200
     Defaults[.searchVisibility] = .always
     Defaults[.showApplicationIcons] = false
     Defaults[.showFooter] = true
@@ -40,6 +43,7 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
   }
 
   override func tearDown() {
+    Defaults[.popupRecentPageSize] = savedPopupRecentPageSize
     Defaults[.searchMode] = savedSearchMode
     Defaults[.searchVisibility] = savedSearchVisibility
     Defaults[.showApplicationIcons] = savedShowApplicationIcons
@@ -108,13 +112,25 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
       let store = InMemoryHistoryStore(items: seededItems)
       let history = History(historyStore: store)
 
-      measurements.append(try await measure(config: config, operation: "History.load") {
+      measurements.append(try await measure(config: config, operation: "History.load.legacy") {
         try await history.load()
         return history.all.count
       })
 
-      measurements.append(measure(config: config, operation: "Popup.firstPaintProxy") {
+      let archiveDatabaseURL = temporaryArchiveDatabaseURL()
+      defer { removeArchiveDatabaseFiles(at: archiveDatabaseURL) }
+      let archiveHistory = try makeArchivePopupHistory(items: seededItems, databaseURL: archiveDatabaseURL)
+      measurements.append(try await measure(config: config, operation: "History.load.archivePopup") {
+        try await archiveHistory.load()
+        return archiveHistory.all.count
+      })
+
+      measurements.append(measure(config: config, operation: "Popup.firstPaintProxy.legacy") {
         measurePopupFirstPaintProxy(history: history)
+      })
+
+      measurements.append(measure(config: config, operation: "Popup.firstPaintProxy.archivePopup") {
+        measurePopupFirstPaintProxy(history: archiveHistory)
       })
 
       for mode in Search.Mode.allCases {
@@ -138,6 +154,34 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
     }
 
     return measurements
+  }
+
+  private func makeArchivePopupHistory(items: [HistoryItem], databaseURL: URL) throws -> History {
+    let database = try ArchiveDatabase.open(at: databaseURL)
+    _ = try database.importLegacyHistoryItems(items)
+    return History(
+      historyStore: InMemoryHistoryStore(items: []),
+      popupHistoryStore: ArchivePopupHistoryStore(database: database)
+    )
+  }
+
+  private func temporaryArchiveDatabaseURL() -> URL {
+    FileManager.default.temporaryDirectory
+      .appending(path: "MaccyPerformanceBaseline-")
+      .appendingPathExtension(UUID().uuidString)
+      .appendingPathExtension("sqlite")
+  }
+
+  private func removeArchiveDatabaseFiles(at databaseURL: URL) {
+    let paths = [
+      databaseURL,
+      URL(fileURLWithPath: databaseURL.path + "-shm"),
+      URL(fileURLWithPath: databaseURL.path + "-wal"),
+    ]
+
+    for path in paths {
+      try? FileManager.default.removeItem(at: path)
+    }
   }
 
   private func measurePopupFirstPaintProxy(history: History) -> Int {

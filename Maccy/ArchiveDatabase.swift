@@ -252,6 +252,27 @@ final class ArchiveDatabase {
     }
   }
 
+  func setPin(itemID: Int64, pin: String?, title: String?, at updatedAt: Date = Date()) throws {
+    try pool.write { db in
+      guard let pin, !pin.isEmpty else {
+        try db.execute(sql: "DELETE FROM pins WHERE item_id = ?", arguments: [itemID])
+        return
+      }
+
+      try db.execute(
+        sql: """
+          INSERT INTO pins (item_id, position, title, key, updated_at)
+          VALUES (?, COALESCE((SELECT MAX(position) + 1 FROM pins), 0), ?, ?, ?)
+          ON CONFLICT(item_id) DO UPDATE SET
+            title = excluded.title,
+            key = excluded.key,
+            updated_at = excluded.updated_at
+        """,
+        arguments: [itemID, title, pin, Self.archiveTimestamp(updatedAt)]
+      )
+    }
+  }
+
   private func fetchRecentPage(after cursor: ArchiveRecentPageCursor?, limit: Int) throws -> ArchiveRecentPage {
     guard limit > 0 else {
       return ArchiveRecentPage(items: [], nextCursor: nil)
@@ -646,8 +667,29 @@ private extension ArchiveDatabase {
     ORDER BY clipboard_items.id
     """
 
+  static let popupArchiveItemSelectSQL = """
+    SELECT
+      clipboard_items.id,
+      source_apps.bundle_identifier AS source_app_bundle_identifier,
+      source_apps.name AS source_app_name,
+      clipboard_items.item_hash,
+      clipboard_items.title,
+      clipboard_items.first_seen_at,
+      clipboard_items.last_seen_at,
+      clipboard_items.change_count,
+      clipboard_items.deleted_at,
+      pins.position AS pin_position,
+      pins.key AS pin_key,
+      pins.title AS pin_title,
+      NULL AS search_title,
+      NULL AS search_text
+    FROM clipboard_items
+    LEFT JOIN source_apps ON source_apps.id = clipboard_items.source_app_id
+    LEFT JOIN pins ON pins.item_id = clipboard_items.id
+    """
+
   static let pinnedItemsSQL = """
-    \(archiveItemSelectSQL)
+    \(popupArchiveItemSelectSQL)
     WHERE clipboard_items.deleted_at IS NULL
       AND pins.item_id IS NOT NULL
     ORDER BY pins.position, clipboard_items.id DESC
@@ -669,7 +711,7 @@ private extension ArchiveDatabase {
     """ : ""
 
     return """
-      \(archiveItemSelectSQL)
+      \(popupArchiveItemSelectSQL)
       WHERE clipboard_items.deleted_at IS NULL
         AND NOT EXISTS (
           SELECT 1

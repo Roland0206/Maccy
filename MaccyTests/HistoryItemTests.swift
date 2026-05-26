@@ -401,6 +401,34 @@ class PopupHistoryStoreSeamTests: XCTestCase {
     XCTAssertFalse(legacyStore.didLoadAll)
   }
 
+  func testHistoryDeleteUsesPopupStoreRowMutation() async throws {
+    let item = historyItem("delete me", lastCopiedAt: 1)
+    let row = PopupHistoryRow(legacyItem: item)
+    popupStore.page = PopupHistoryPage(pinnedRows: [], recentRows: [row])
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+    history.delete(history.items.first)
+
+    XCTAssertEqual(popupStore.deletedRowIDs, [row.id])
+    XCTAssertEqual(history.items.map(\.item.title), [])
+  }
+
+  func testHistoryTogglePinUsesPopupStoreRowMutation() async throws {
+    let item = historyItem("pin me", lastCopiedAt: 1)
+    let row = PopupHistoryRow(legacyItem: item)
+    popupStore.page = PopupHistoryPage(pinnedRows: [], recentRows: [row])
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+    let decorator = try XCTUnwrap(history.items.first)
+    history.togglePin(decorator)
+
+    XCTAssertEqual(popupStore.pinnedRows.map(\.id), [row.id])
+    XCTAssertEqual(popupStore.pinnedRows.first?.pin, decorator.item.pin)
+    XCTAssertNotNil(decorator.item.pin)
+  }
+
   private func historyItem(_ value: String, lastCopiedAt: TimeInterval) -> HistoryItem {
     let item = HistoryItem()
     item.contents = [
@@ -422,6 +450,8 @@ private final class RecordingPopupHistoryStore: PopupHistoryStore {
   var loadedMoreRecentCursors: [PopupHistoryPageCursor] = []
   var loadedMoreRecentLimits: [Int] = []
   var materializedRowIDs: [String] = []
+  var deletedRowIDs: [String] = []
+  var pinnedRows: [(id: String, pin: String?)] = []
   var page = PopupHistoryPage(pinnedRows: [], recentRows: [])
   var nextRecentPage = PopupHistoryRecentPage(rows: [], nextCursor: nil)
 
@@ -442,6 +472,14 @@ private final class RecordingPopupHistoryStore: PopupHistoryStore {
       throw PopupHistoryStoreError.unsupportedRow(row.id)
     }
     return item
+  }
+
+  func delete(_ row: PopupHistoryRow) throws {
+    deletedRowIDs.append(row.id)
+  }
+
+  func setPin(_ row: PopupHistoryRow, pin: String?) throws {
+    pinnedRows.append((id: row.id, pin: pin))
   }
 }
 

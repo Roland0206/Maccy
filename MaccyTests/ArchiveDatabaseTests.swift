@@ -296,6 +296,40 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertEqual(item.lastCopiedAt, Date(timeIntervalSince1970: 200))
   }
 
+  @MainActor
+  func testArchivePopupHistoryStoreDeletesVisibleRows() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Delete me", text: "delete", lastCopiedAt: 200),
+      historyItem(title: "Keep me", text: "keep", lastCopiedAt: 100),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+    let row = try XCTUnwrap(store.loadInitialRows(recentLimit: 10).recentRows.first)
+
+    try store.delete(row)
+
+    XCTAssertEqual(try database.firstRecentPage(limit: 10).items.map(\.title), ["Keep me"])
+    XCTAssertNotNil(try database.archiveSnapshot().items.first { $0.title == "Delete me" }?.deletedAt)
+  }
+
+  @MainActor
+  func testArchivePopupHistoryStorePinsAndUnpinsVisibleRows() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Pin me", text: "pin", lastCopiedAt: 200),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+    let row = try XCTUnwrap(store.loadInitialRows(recentLimit: 10).recentRows.first)
+
+    try store.setPin(row, pin: "p")
+    XCTAssertEqual(try database.pinnedItems().compactMap(\.pinKey), ["p"])
+    XCTAssertEqual(try database.firstRecentPage(limit: 10).items, [])
+
+    try store.setPin(row, pin: nil)
+    XCTAssertEqual(try database.pinnedItems(), [])
+    XCTAssertEqual(try database.firstRecentPage(limit: 10).items.map(\.title), ["Pin me"])
+  }
+
   private func historyItem(title: String, contents: [HistoryItemContent]) -> HistoryItem {
     let item = HistoryItem(contents: contents)
     item.title = title

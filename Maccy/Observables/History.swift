@@ -72,6 +72,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   private var cachedPopupRowIDs = Set<String>()
 
   @ObservationIgnored
+  private var popupRowsByMaterializedItemID: [ObjectIdentifier: PopupHistoryRow] = [:]
+
+  @ObservationIgnored
   private var sessionLog: [Int: HistoryItem] = [:]
 
   // The distinction between `all` and `items` is the following:
@@ -127,6 +130,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @MainActor
   func load() async throws {
     let page = try popupHistoryStore.loadInitialRows(recentLimit: Defaults[.popupRecentPageSize])
+    popupRowsByMaterializedItemID.removeAll()
     let results = try materialize(page.rows)
     all = sorter.sort(results).map { HistoryItemDecorator($0) }
     items = all
@@ -189,7 +193,11 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   private func materialize(_ rows: [PopupHistoryRow]) throws -> [HistoryItem] {
-    try rows.map { try popupHistoryStore.materialize($0) }
+    try rows.map { row in
+      let item = try popupHistoryStore.materialize(row)
+      popupRowsByMaterializedItemID[ObjectIdentifier(item)] = row
+      return item
+    }
   }
 
   @MainActor
@@ -325,6 +333,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       }
       all.removeAll()
       sessionLog.removeAll()
+      popupRowsByMaterializedItemID.removeAll()
+      cachedPopupRowIDs.removeAll()
+      nextRecentRowsCursor = nil
       items = all
 
       try? historyStore.deleteAll()
@@ -343,11 +354,16 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
     cleanup(item)
     withLogging("Removing history item") {
-      try? historyStore.delete(item.item)
+      if let row = popupRow(for: item) {
+        try? popupHistoryStore.delete(row)
+      } else {
+        try? historyStore.delete(item.item)
+      }
     }
 
     all.removeAll { $0 == item }
     items.removeAll { $0 == item }
+    popupRowsByMaterializedItemID.removeValue(forKey: ObjectIdentifier(item.item))
     sessionLog.removeValues { $0 == item.item }
 
     updateUnpinnedShortcuts()
@@ -496,7 +512,11 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   func togglePin(_ item: HistoryItemDecorator?) {
     guard let item else { return }
 
-    item.togglePin()
+    let pin = item.item.pin == nil ? nextAvailablePin(excluding: item) : nil
+    item.item.pin = pin
+    if let row = popupRow(for: item) {
+      try? popupHistoryStore.setPin(row, pin: pin)
+    }
 
     let sortedItems = sorter.sort(all.map(\.item))
     if let currentIndex = all.firstIndex(of: item),
@@ -512,6 +532,16 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     if item.isUnpinned {
       AppState.shared.navigator.scrollTarget = item.id
     }
+  }
+
+  @MainActor
+  private func popupRow(for item: HistoryItemDecorator) -> PopupHistoryRow? {
+    popupRowsByMaterializedItemID[ObjectIdentifier(item.item)]
+  }
+
+  private func nextAvailablePin(excluding item: HistoryItemDecorator) -> String {
+    let assignedPins = Set(all.filter { $0 != item }.compactMap(\.item.pin))
+    return HistoryItem.supportedPins.subtracting(assignedPins).sorted().first ?? ""
   }
 
   @MainActor

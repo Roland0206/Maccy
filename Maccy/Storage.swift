@@ -136,6 +136,8 @@ protocol PopupHistoryStore {
   func loadInitialRows(recentLimit: Int) throws -> PopupHistoryPage
   func loadMoreRecentRows(after cursor: PopupHistoryPageCursor, limit: Int) throws -> PopupHistoryRecentPage
   func materialize(_ row: PopupHistoryRow) throws -> HistoryItem
+  func delete(_ row: PopupHistoryRow) throws
+  func setPin(_ row: PopupHistoryRow, pin: String?) throws
 }
 
 @MainActor
@@ -181,6 +183,26 @@ struct SwiftDataPopupHistoryStore: PopupHistoryStore {
 
     return item
   }
+
+  @MainActor
+  func delete(_ row: PopupHistoryRow) throws {
+    guard case .legacy = row.source,
+          let item = row.materializeLegacyItem() else {
+      throw PopupHistoryStoreError.unsupportedRow(row.id)
+    }
+
+    try historyStore.delete(item)
+  }
+
+  @MainActor
+  func setPin(_ row: PopupHistoryRow, pin: String?) throws {
+    guard case .legacy = row.source,
+          let item = row.materializeLegacyItem() else {
+      throw PopupHistoryStoreError.unsupportedRow(row.id)
+    }
+
+    item.pin = pin
+  }
 }
 
 struct ArchivePopupHistoryStore: PopupHistoryStore {
@@ -223,6 +245,24 @@ struct ArchivePopupHistoryStore: PopupHistoryStore {
     }
 
     return item
+  }
+
+  @MainActor
+  func delete(_ row: PopupHistoryRow) throws {
+    guard case let .archive(id) = row.source else {
+      throw PopupHistoryStoreError.unsupportedRow(row.id)
+    }
+
+    try database.softDeleteItem(id: id)
+  }
+
+  @MainActor
+  func setPin(_ row: PopupHistoryRow, pin: String?) throws {
+    guard case let .archive(id) = row.source else {
+      throw PopupHistoryStoreError.unsupportedRow(row.id)
+    }
+
+    try database.setPin(itemID: id, pin: pin, title: row.title)
   }
 }
 
