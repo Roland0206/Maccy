@@ -234,6 +234,8 @@ class NavigationManager { // swiftlint:disable:this type_body_length
     if let historyItem = history.firstVisibleItem(where: { $0.id == lead }) {
       if let nextItem = history.visibleItem(after: historyItem) {
         selectFromKeyboardNavigation(item: nextItem)
+      } else if history.hasMoreRecentRows {
+        loadMoreRecentRows(after: historyItem, allowCycle: allowCycle)
       } else if let nextItem = footer.firstVisibleItem {
         selectFromKeyboardNavigation(footerItem: nextItem)
       } else if allowCycle {
@@ -265,6 +267,19 @@ class NavigationManager { // swiftlint:disable:this type_body_length
       selectFromKeyboardNavigation(footerItem: footer.lastVisibleItem)
     } else {
       selectFromKeyboardNavigation(footerItem: footer.firstVisibleItem)
+    }
+  }
+
+  private func loadMoreRecentRows(after item: HistoryItemDecorator, allowCycle: Bool) {
+    Task { @MainActor in
+      let loadedRows = await history.loadMoreRecentRowsIfNeeded(after: item)
+      if loadedRows, let nextItem = history.visibleItem(after: item) {
+        selectFromKeyboardNavigation(item: nextItem)
+      } else if let nextItem = footer.firstVisibleItem {
+        selectFromKeyboardNavigation(footerItem: nextItem)
+      } else if allowCycle {
+        highlightFirst()
+      }
     }
   }
 

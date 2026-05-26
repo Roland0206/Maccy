@@ -380,6 +380,27 @@ class PopupHistoryStoreSeamTests: XCTestCase {
     XCTAssertEqual(history.items.map(\.item.title), ["newer", "older"])
   }
 
+  func testHistoryAppendsNextRecentPageOnDemand() async throws {
+    let newest = historyItem("newest", lastCopiedAt: 3)
+    let middle = historyItem("middle", lastCopiedAt: 2)
+    let oldest = historyItem("oldest", lastCopiedAt: 1)
+    let firstRows = [PopupHistoryRow(legacyItem: newest), PopupHistoryRow(legacyItem: middle)]
+    let nextRows = [PopupHistoryRow(legacyItem: oldest)]
+    let cursor = PopupHistoryPageCursor.archive(ArchiveRecentPageCursor(lastCopiedAt: "2", id: 2))
+    popupStore.page = PopupHistoryPage(pinnedRows: [], recentRows: firstRows, nextRecentCursor: cursor)
+    popupStore.nextRecentPage = PopupHistoryRecentPage(rows: nextRows, nextCursor: nil)
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+    let loaded = await history.loadMoreRecentRowsIfNeeded(after: history.unpinnedItems.last)
+
+    XCTAssertTrue(loaded)
+    XCTAssertEqual(popupStore.loadedMoreRecentLimits, [2])
+    XCTAssertEqual(popupStore.loadedMoreRecentCursors, [cursor])
+    XCTAssertEqual(history.items.map(\.item.title), ["newest", "middle", "oldest"])
+    XCTAssertFalse(legacyStore.didLoadAll)
+  }
+
   private func historyItem(_ value: String, lastCopiedAt: TimeInterval) -> HistoryItem {
     let item = HistoryItem()
     item.contents = [
@@ -398,12 +419,21 @@ class PopupHistoryStoreSeamTests: XCTestCase {
 @MainActor
 private final class RecordingPopupHistoryStore: PopupHistoryStore {
   var loadedRecentLimits: [Int] = []
+  var loadedMoreRecentCursors: [PopupHistoryPageCursor] = []
+  var loadedMoreRecentLimits: [Int] = []
   var materializedRowIDs: [String] = []
   var page = PopupHistoryPage(pinnedRows: [], recentRows: [])
+  var nextRecentPage = PopupHistoryRecentPage(rows: [], nextCursor: nil)
 
   func loadInitialRows(recentLimit: Int) throws -> PopupHistoryPage {
     loadedRecentLimits.append(recentLimit)
     return page
+  }
+
+  func loadMoreRecentRows(after cursor: PopupHistoryPageCursor, limit: Int) throws -> PopupHistoryRecentPage {
+    loadedMoreRecentCursors.append(cursor)
+    loadedMoreRecentLimits.append(limit)
+    return nextRecentPage
   }
 
   func materialize(_ row: PopupHistoryRow) throws -> HistoryItem {

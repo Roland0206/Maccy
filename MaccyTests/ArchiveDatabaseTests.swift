@@ -259,6 +259,25 @@ final class ArchiveDatabaseTests: XCTestCase {
   }
 
   @MainActor
+  func testArchivePopupHistoryStoreLoadsMoreRecentRowsAfterInitialCursor() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Oldest", text: "oldest", lastCopiedAt: 100),
+      historyItem(title: "Middle", text: "middle", lastCopiedAt: 200),
+      historyItem(title: "Newest", text: "newest", lastCopiedAt: 300),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+    let firstPage = try store.loadInitialRows(recentLimit: 2)
+    let cursor = try XCTUnwrap(firstPage.nextRecentCursor)
+
+    let nextPage = try store.loadMoreRecentRows(after: cursor, limit: 2)
+
+    XCTAssertEqual(firstPage.recentRows.map(\.title), ["Newest", "Middle"])
+    XCTAssertEqual(nextPage.rows.map(\.title), ["Oldest"])
+    XCTAssertNil(nextPage.nextCursor)
+  }
+
+  @MainActor
   func testArchivePopupHistoryStoreMaterializesPayloadForSelection() throws {
     let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
     try database.importLegacyHistoryItems([

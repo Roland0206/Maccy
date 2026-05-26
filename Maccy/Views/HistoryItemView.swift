@@ -48,6 +48,9 @@ struct HistoryItemView: View {
     }
     .onAppear {
       item.ensureThumbnailImage()
+      Task {
+        await appState.history.loadMoreRecentRowsIfNeeded(after: item)
+      }
     }
     .onTapGesture {
       if NSEvent.modifierFlags.contains(.command) && appState.multiSelectionEnabled {

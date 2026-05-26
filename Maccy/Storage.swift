@@ -100,9 +100,29 @@ struct PopupHistoryRow: Equatable, Identifiable {
   }
 }
 
+enum PopupHistoryPageCursor: Equatable {
+  case archive(ArchiveRecentPageCursor)
+}
+
+struct PopupHistoryRecentPage: Equatable {
+  let rows: [PopupHistoryRow]
+  let nextCursor: PopupHistoryPageCursor?
+}
+
 struct PopupHistoryPage: Equatable {
   let pinnedRows: [PopupHistoryRow]
   let recentRows: [PopupHistoryRow]
+  let nextRecentCursor: PopupHistoryPageCursor?
+
+  init(
+    pinnedRows: [PopupHistoryRow],
+    recentRows: [PopupHistoryRow],
+    nextRecentCursor: PopupHistoryPageCursor? = nil
+  ) {
+    self.pinnedRows = pinnedRows
+    self.recentRows = recentRows
+    self.nextRecentCursor = nextRecentCursor
+  }
 
   var rows: [PopupHistoryRow] { pinnedRows + recentRows }
 }
@@ -114,6 +134,7 @@ enum PopupHistoryStoreError: Error, Equatable {
 @MainActor
 protocol PopupHistoryStore {
   func loadInitialRows(recentLimit: Int) throws -> PopupHistoryPage
+  func loadMoreRecentRows(after cursor: PopupHistoryPageCursor, limit: Int) throws -> PopupHistoryRecentPage
   func materialize(_ row: PopupHistoryRow) throws -> HistoryItem
 }
 
@@ -147,6 +168,11 @@ struct SwiftDataPopupHistoryStore: PopupHistoryStore {
   }
 
   @MainActor
+  func loadMoreRecentRows(after _: PopupHistoryPageCursor, limit _: Int) throws -> PopupHistoryRecentPage {
+    PopupHistoryRecentPage(rows: [], nextCursor: nil)
+  }
+
+  @MainActor
   func materialize(_ row: PopupHistoryRow) throws -> HistoryItem {
     guard case .legacy = row.source,
           let item = row.materializeLegacyItem() else {
@@ -167,10 +193,26 @@ struct ArchivePopupHistoryStore: PopupHistoryStore {
   @MainActor
   func loadInitialRows(recentLimit: Int) throws -> PopupHistoryPage {
     let pinnedRows = try database.pinnedItems().map { PopupHistoryRow(archiveItem: $0) }
-    let recentRows = try database.firstRecentPage(limit: recentLimit).items.map {
-      PopupHistoryRow(archiveItem: $0)
+    let recentPage = try database.firstRecentPage(limit: recentLimit)
+    let recentRows = recentPage.items.map { PopupHistoryRow(archiveItem: $0) }
+    return PopupHistoryPage(
+      pinnedRows: pinnedRows,
+      recentRows: recentRows,
+      nextRecentCursor: recentPage.nextCursor.map(PopupHistoryPageCursor.archive)
+    )
+  }
+
+  @MainActor
+  func loadMoreRecentRows(after cursor: PopupHistoryPageCursor, limit: Int) throws -> PopupHistoryRecentPage {
+    guard case let .archive(archiveCursor) = cursor else {
+      throw PopupHistoryStoreError.unsupportedRow("cursor")
     }
-    return PopupHistoryPage(pinnedRows: pinnedRows, recentRows: recentRows)
+
+    let page = try database.recentPage(after: archiveCursor, limit: limit)
+    return PopupHistoryRecentPage(
+      rows: page.items.map { PopupHistoryRow(archiveItem: $0) },
+      nextCursor: page.nextCursor.map(PopupHistoryPageCursor.archive)
+    )
   }
 
   @MainActor

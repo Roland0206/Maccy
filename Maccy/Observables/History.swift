@@ -17,6 +17,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   var pinnedItems: [HistoryItemDecorator] { items.filter(\.isPinned) }
   var unpinnedItems: [HistoryItemDecorator] { items.filter(\.isUnpinned) }
+  var hasMoreRecentRows: Bool { searchQuery.isEmpty && nextRecentRowsCursor != nil }
 
   var searchQuery: String = "" {
     didSet {
@@ -60,6 +61,15 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @ObservationIgnored
   private let popupHistoryStore: any PopupHistoryStore
+
+  @ObservationIgnored
+  private var nextRecentRowsCursor: PopupHistoryPageCursor?
+
+  @ObservationIgnored
+  private var isLoadingMoreRecentRows = false
+
+  @ObservationIgnored
+  private var cachedPopupRowIDs = Set<String>()
 
   @ObservationIgnored
   private var sessionLog: [Int: HistoryItem] = [:]
@@ -117,9 +127,11 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @MainActor
   func load() async throws {
     let page = try popupHistoryStore.loadInitialRows(recentLimit: Defaults[.popupRecentPageSize])
-    let results = try page.rows.map { try popupHistoryStore.materialize($0) }
+    let results = try materialize(page.rows)
     all = sorter.sort(results).map { HistoryItemDecorator($0) }
     items = all
+    cachedPopupRowIDs = Set(page.rows.map(\.id))
+    nextRecentRowsCursor = page.nextRecentCursor
 
     limitHistorySize(to: Defaults[.size])
 
@@ -128,6 +140,69 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     Task {
       AppState.shared.popup.needsResize = true
     }
+  }
+
+  @MainActor
+  @discardableResult
+  func loadMoreRecentRowsIfNeeded(after item: HistoryItemDecorator?) async -> Bool {
+    guard shouldLoadMoreRecentRows(after: item) else { return false }
+    return await loadMoreRecentRows()
+  }
+
+  @MainActor
+  @discardableResult
+  func loadMoreRecentRows() async -> Bool {
+    guard !isLoadingMoreRecentRows,
+          searchQuery.isEmpty,
+          let cursor = nextRecentRowsCursor else {
+      return false
+    }
+
+    isLoadingMoreRecentRows = true
+    defer { isLoadingMoreRecentRows = false }
+
+    do {
+      let page = try popupHistoryStore.loadMoreRecentRows(after: cursor, limit: Defaults[.popupRecentPageSize])
+      nextRecentRowsCursor = page.nextCursor
+      let newRows = page.rows.filter { cachedPopupRowIDs.insert($0.id).inserted }
+      let decorators = try materialize(newRows).map { HistoryItemDecorator($0) }
+      appendRecentDecorators(decorators)
+      return !decorators.isEmpty
+    } catch {
+      logger.error("Failed to load more recent rows: \(error.localizedDescription)")
+      nextRecentRowsCursor = nil
+      return false
+    }
+  }
+
+  @MainActor
+  private func shouldLoadMoreRecentRows(after item: HistoryItemDecorator?) -> Bool {
+    guard searchQuery.isEmpty,
+          nextRecentRowsCursor != nil,
+          let item,
+          let index = unpinnedItems.firstIndex(of: item) else {
+      return false
+    }
+
+    return index >= max(unpinnedItems.count - 10, 0)
+  }
+
+  @MainActor
+  private func materialize(_ rows: [PopupHistoryRow]) throws -> [HistoryItem] {
+    try rows.map { try popupHistoryStore.materialize($0) }
+  }
+
+  @MainActor
+  private func appendRecentDecorators(_ decorators: [HistoryItemDecorator]) {
+    guard !decorators.isEmpty else { return }
+
+    let insertionIndex = all.lastIndex(where: \.isUnpinned).map { all.index(after: $0) } ??
+      all.firstIndex(where: \.isPinned) ?? all.endIndex
+    all.insert(contentsOf: decorators, at: insertionIndex)
+    items = all
+
+    updateUnpinnedShortcuts()
+    AppState.shared.popup.needsResize = true
   }
 
   @MainActor
