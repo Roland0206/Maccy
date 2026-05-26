@@ -52,6 +52,257 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertFalse(health.schemaTables.contains { $0.hasPrefix("Z") })
   }
 
+  func testRepresentationSchemaIncludesHybridPayloadMetadata() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let columns = try database.representationColumnNames()
+
+    XCTAssertTrue(columns.contains("payload_hash"))
+    XCTAssertTrue(columns.contains("storage_kind"))
+    XCTAssertTrue(columns.contains("relative_path"))
+  }
+
+  func testPayloadStoreWritesContentAddressedFilesByHash() throws {
+    let store = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let data = Data("external payload seam".utf8)
+
+    let firstPayload = try store.write(data)
+    let secondPayload = try store.write(data)
+    let fileURL = store.fileURL(forRelativePath: firstPayload.relativePath)
+
+    XCTAssertEqual(firstPayload, secondPayload)
+    XCTAssertEqual(firstPayload.byteCount, data.count)
+    XCTAssertEqual(firstPayload.relativePath, "\(firstPayload.hash.prefix(2))/\(firstPayload.hash)")
+    XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+    XCTAssertEqual(try store.read(relativePath: firstPayload.relativePath), data)
+  }
+
+  @MainActor
+  func testImportsSmallPayloadInlineWhenWithinThreshold() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 10
+    )
+    let data = Data("small".utf8)
+
+    let report = try database.importLegacyHistoryItems([
+      historyItem(title: "Small", contents: [content(.string, data)]),
+    ])
+    let representation = try XCTUnwrap(database.archiveSnapshot().items.first?.representations.first)
+
+    XCTAssertEqual(report.representationsImported, 1)
+    XCTAssertEqual(representation.storageKind, .inline)
+    XCTAssertEqual(representation.value, data)
+    XCTAssertEqual(representation.size, data.count)
+    XCTAssertNil(representation.relativePath)
+    XCTAssertEqual(try payloadFileCount(in: payloadStore.rootDirectory), 0)
+  }
+
+  @MainActor
+  func testImportsLargePayloadExternallyWhenAboveThreshold() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 4
+    )
+    let data = Data("large payload".utf8)
+
+    let report = try database.importLegacyHistoryItems([
+      historyItem(title: "Large", contents: [content(.string, data)]),
+    ])
+    let representation = try XCTUnwrap(database.archiveSnapshot().items.first?.representations.first)
+    let relativePath = try XCTUnwrap(representation.relativePath)
+
+    XCTAssertEqual(report.representationsImported, 1)
+    XCTAssertEqual(representation.storageKind, .external)
+    XCTAssertEqual(representation.value, data)
+    XCTAssertEqual(representation.size, data.count)
+    XCTAssertEqual(representation.payloadHash, ArchivePayloadStore.payloadHash(for: data))
+    XCTAssertEqual(relativePath, ArchivePayloadStore.relativePath(forHash: ArchivePayloadStore.payloadHash(for: data)))
+    XCTAssertEqual(try payloadStore.read(relativePath: relativePath), data)
+  }
+
+  @MainActor
+  func testListQueriesLoadRepresentationMetadataWithoutPayloadBytes() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 10
+    )
+    let smallData = Data("small".utf8)
+    let largeData = Data("large payload".utf8)
+
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Pinned Large", contents: [content(.string, largeData)], pin: "p"),
+      historyItem(title: "Recent Small", contents: [content(.string, smallData)]),
+    ])
+
+    let pinnedRepresentation = try XCTUnwrap(database.pinnedItems().first?.representations.first)
+    let recentRepresentation = try XCTUnwrap(database.firstRecentPage(limit: 10).items.first?.representations.first)
+
+    XCTAssertEqual(pinnedRepresentation.storageKind, .external)
+    XCTAssertEqual(pinnedRepresentation.value, Data())
+    XCTAssertEqual(pinnedRepresentation.size, largeData.count)
+    XCTAssertTrue(pinnedRepresentation.hasPayload)
+    XCTAssertEqual(recentRepresentation.storageKind, .inline)
+    XCTAssertEqual(recentRepresentation.value, Data())
+    XCTAssertEqual(recentRepresentation.size, smallData.count)
+    XCTAssertTrue(recentRepresentation.hasPayload)
+  }
+
+  @MainActor
+  func testArchivePopupHistoryStoreMaterializesExternalPayloadForSelection() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let data = Data("materialized external payload".utf8)
+    try database.importLegacyHistoryItems([
+      historyItem(title: "External", contents: [content(.string, data)]),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+    let row = try XCTUnwrap(store.loadInitialRows(recentLimit: 1).recentRows.first)
+
+    let item = try store.materialize(row)
+
+    XCTAssertEqual(item.contents.first?.value, data)
+    XCTAssertEqual(item.text, String(data: data, encoding: .utf8))
+  }
+
+  @MainActor
+  func testMissingExternalPayloadFileThrowsExplicitError() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let data = Data("missing external payload".utf8)
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Missing", contents: [content(.string, data)]),
+    ])
+    let snapshot = try database.archiveSnapshot()
+    let itemID = try XCTUnwrap(snapshot.items.first?.id)
+    let relativePath = try XCTUnwrap(snapshot.items.first?.representations.first?.relativePath)
+    try FileManager.default.removeItem(at: payloadStore.fileURL(forRelativePath: relativePath))
+
+    XCTAssertThrowsError(try database.item(id: itemID)) { error in
+      XCTAssertEqual(error as? ArchivePayloadStoreError, .missingExternalFile(relativePath: relativePath))
+    }
+  }
+
+  @MainActor
+  func testImportDeduplicatesExternalPayloadFilesByHash() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let data = Data("shared large payload".utf8)
+
+    let report = try database.importLegacyHistoryItems([
+      historyItem(title: "First", contents: [content(.string, data)]),
+      historyItem(title: "Second", contents: [content(.string, data)]),
+    ])
+    let representations = try database.archiveSnapshot().items.flatMap(\.representations)
+
+    XCTAssertEqual(report.representationsImported, 2)
+    XCTAssertEqual(Set(representations.map(\.storageKind)), [.external])
+    XCTAssertEqual(Set(representations.compactMap(\.relativePath)).count, 1)
+    XCTAssertEqual(try payloadFileCount(in: payloadStore.rootDirectory), 1)
+  }
+
+  @MainActor
+  func testFindsExternalPayloadFilesNotReferencedByArchive() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    _ = try database.importLegacyHistoryItems([
+      historyItem(
+        title: "Referenced",
+        contents: [content(.string, Data("referenced payload".utf8))]
+      ),
+    ])
+    let orphanData = Data("orphan payload".utf8)
+    let orphan = try payloadStore.write(orphanData)
+
+    let orphans = try database.orphanedExternalPayloadFiles()
+
+    XCTAssertEqual(orphans, [
+      ArchivePayloadFile(relativePath: orphan.relativePath, byteCount: orphanData.count),
+    ])
+  }
+
+  @MainActor
+  func testCleanupRemovesOnlyUnreferencedExternalPayloadFiles() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let referencedData = Data("referenced payload".utf8)
+    _ = try database.importLegacyHistoryItems([
+      historyItem(title: "Referenced", contents: [content(.string, referencedData)]),
+    ])
+    let referencedPath = try XCTUnwrap(database.archiveSnapshot().items.first?.representations.first?.relativePath)
+    let orphanData = Data("orphan payload".utf8)
+    let orphan = try payloadStore.write(orphanData)
+
+    let deleted = try database.cleanupOrphanedExternalPayloadFiles()
+
+    XCTAssertEqual(deleted, [
+      ArchivePayloadFile(relativePath: orphan.relativePath, byteCount: orphanData.count),
+    ])
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: payloadStore.fileURL(forRelativePath: orphan.relativePath).path
+    ))
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: payloadStore.fileURL(forRelativePath: referencedPath).path
+    ))
+    XCTAssertEqual(try database.orphanedExternalPayloadFiles(), [])
+  }
+
+  @MainActor
+  func testPermanentDeleteCleansExternalPayloadAfterLastReferenceIsRemoved() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let sharedData = Data("shared delete payload".utf8)
+    _ = try database.importLegacyHistoryItems([
+      historyItem(title: "First", contents: [content(.string, sharedData)]),
+      historyItem(title: "Second", contents: [content(.string, sharedData)]),
+    ])
+    let snapshot = try database.archiveSnapshot()
+    let firstID = try itemID(titled: "First", in: snapshot)
+    let secondID = try itemID(titled: "Second", in: snapshot)
+    let relativePath = try XCTUnwrap(snapshot.items.first?.representations.first?.relativePath)
+
+    XCTAssertEqual(try database.deleteItemPermanently(id: firstID), [])
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: payloadStore.fileURL(forRelativePath: relativePath).path
+    ))
+
+    let deleted = try database.deleteItemPermanently(id: secondID)
+
+    XCTAssertEqual(deleted, [ArchivePayloadFile(relativePath: relativePath, byteCount: sharedData.count)])
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: payloadStore.fileURL(forRelativePath: relativePath).path
+    ))
+  }
+
   func testFTS5CapabilitySmokeTest() throws {
     let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
     let health = try database.healthCheck()
@@ -232,6 +483,8 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertEqual(representation.value, "hello archive".data(using: .utf8))
     XCTAssertEqual(representation.size, 13)
     XCTAssertNotNil(representation.payloadHash)
+    XCTAssertEqual(representation.storageKind, .inline)
+    XCTAssertNil(representation.relativePath)
   }
 
   @MainActor
@@ -493,9 +746,14 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertTrue(try database.archiveSnapshot().items.allSatisfy { $0.deletedAt != nil })
   }
 
-  private func historyItem(title: String, contents: [HistoryItemContent]) -> HistoryItem {
+  private func historyItem(
+    title: String,
+    contents: [HistoryItemContent],
+    pin: String? = nil
+  ) -> HistoryItem {
     let item = HistoryItem(contents: contents)
     item.title = title
+    item.pin = pin
     return item
   }
 
@@ -525,6 +783,24 @@ final class ArchiveDatabaseTests: XCTestCase {
 
   private func content(_ type: NSPasteboard.PasteboardType, _ value: Data) -> HistoryItemContent {
     HistoryItemContent(type: type.rawValue, value: value)
+  }
+
+  private func payloadFileCount(in directory: URL) throws -> Int {
+    guard let enumerator = FileManager.default.enumerator(
+      at: directory,
+      includingPropertiesForKeys: [.isDirectoryKey]
+    ) else {
+      return 0
+    }
+
+    var count = 0
+    for case let fileURL as URL in enumerator {
+      let values = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
+      if values.isDirectory == false {
+        count += 1
+      }
+    }
+    return count
   }
 
   private func imageData() -> Data? {

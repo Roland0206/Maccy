@@ -73,7 +73,7 @@ struct PopupHistoryRow: Equatable, Identifiable {
       PopupHistoryRowContent(
         type: representation.type,
         size: representation.size,
-        hasPayload: true
+        hasPayload: representation.hasPayload
       )
     }
     legacyItem = nil
