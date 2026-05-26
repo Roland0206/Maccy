@@ -34,6 +34,7 @@ class AppState: Sendable {
 
   private let about = About()
   private var settingsWindowController: SettingsWindowController?
+  private var archiveModeWindowController: NSWindowController?
 
   init(history: History, footer: Footer) {
     self.history = history
@@ -103,6 +104,23 @@ class AppState: Sendable {
 
   func openAbout() {
     about.openAbout(nil)
+  }
+
+  @MainActor
+  func openArchiveMode() {
+    if archiveModeWindowController == nil {
+      let hostingController = NSHostingController(rootView: ArchiveModeView())
+      let window = NSWindow(contentViewController: hostingController)
+      window.title = "Archive Mode"
+      window.setContentSize(NSSize(width: 900, height: 560))
+      window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+      window.identifier = NSUserInterfaceItemIdentifier("org.p0deje.Maccy.archiveMode")
+      archiveModeWindowController = NSWindowController(window: window)
+    }
+
+    archiveModeWindowController?.showWindow(nil)
+    archiveModeWindowController?.window?.orderFrontRegardless()
+    NSApp.activate(ignoringOtherApps: true)
   }
 
   @MainActor

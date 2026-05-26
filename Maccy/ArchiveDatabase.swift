@@ -1353,6 +1353,19 @@ enum ArchiveDatabaseBootstrap {
     }
   }
 
+  static func archiveBrowsingStoreIfEnabled() -> (any ArchiveBrowsingStore)? {
+    guard ArchiveDatabaseFeature.isEnabled else {
+      return nil
+    }
+
+    do {
+      return ArchivePopupHistoryStore(database: try sharedDatabase())
+    } catch {
+      NSLog("Maccy archive mode store failed: \(error.localizedDescription)")
+      return nil
+    }
+  }
+
   private static func sharedDatabase() throws -> ArchiveDatabase {
     if let database {
       return database
