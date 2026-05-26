@@ -17,6 +17,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   var pinnedItems: [HistoryItemDecorator] { items.filter(\.isPinned) }
   var unpinnedItems: [HistoryItemDecorator] { items.filter(\.isUnpinned) }
+  var hasMoreRecentRows: Bool { searchQuery.isEmpty && nextRecentRowsCursor != nil }
 
   var searchQuery: String = "" {
     didSet {
@@ -59,6 +60,21 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   private let historyStore: any LegacyHistoryStore
 
   @ObservationIgnored
+  private let popupHistoryStore: any PopupHistoryStore
+
+  @ObservationIgnored
+  private var nextRecentRowsCursor: PopupHistoryPageCursor?
+
+  @ObservationIgnored
+  private var isLoadingMoreRecentRows = false
+
+  @ObservationIgnored
+  private var cachedPopupRowIDs = Set<String>()
+
+  @ObservationIgnored
+  private var popupRowsByMaterializedItemID: [ObjectIdentifier: PopupHistoryRow] = [:]
+
+  @ObservationIgnored
   private var sessionLog: [Int: HistoryItem] = [:]
 
   // The distinction between `all` and `items` is the following:
@@ -67,8 +83,14 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @ObservationIgnored
   var all: [HistoryItemDecorator] = []
 
-  init(historyStore: any LegacyHistoryStore = SwiftDataHistoryStore()) {
+  init(
+    historyStore: any LegacyHistoryStore = SwiftDataHistoryStore(),
+    popupHistoryStore: (any PopupHistoryStore)? = nil
+  ) {
     self.historyStore = historyStore
+    self.popupHistoryStore = popupHistoryStore ??
+      ArchiveDatabaseBootstrap.popupHistoryStoreIfEnabled() ??
+      SwiftDataPopupHistoryStore(historyStore: historyStore)
 
     Task {
       for await _ in Defaults.updates(.pasteByDefault, initial: false) {
@@ -107,9 +129,13 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func load() async throws {
-    let results = try historyStore.loadAll()
+    let page = try popupHistoryStore.loadInitialRows(recentLimit: Defaults[.popupRecentPageSize])
+    popupRowsByMaterializedItemID.removeAll()
+    let results = try materialize(page.rows)
     all = sorter.sort(results).map { HistoryItemDecorator($0) }
     items = all
+    cachedPopupRowIDs = Set(page.rows.map(\.id))
+    nextRecentRowsCursor = page.nextRecentCursor
 
     limitHistorySize(to: Defaults[.size])
 
@@ -118,6 +144,73 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     Task {
       AppState.shared.popup.needsResize = true
     }
+  }
+
+  @MainActor
+  @discardableResult
+  func loadMoreRecentRowsIfNeeded(after item: HistoryItemDecorator?) async -> Bool {
+    guard shouldLoadMoreRecentRows(after: item) else { return false }
+    return await loadMoreRecentRows()
+  }
+
+  @MainActor
+  @discardableResult
+  func loadMoreRecentRows() async -> Bool {
+    guard !isLoadingMoreRecentRows,
+          searchQuery.isEmpty,
+          let cursor = nextRecentRowsCursor else {
+      return false
+    }
+
+    isLoadingMoreRecentRows = true
+    defer { isLoadingMoreRecentRows = false }
+
+    do {
+      let page = try popupHistoryStore.loadMoreRecentRows(after: cursor, limit: Defaults[.popupRecentPageSize])
+      nextRecentRowsCursor = page.nextCursor
+      let newRows = page.rows.filter { cachedPopupRowIDs.insert($0.id).inserted }
+      let decorators = try materialize(newRows).map { HistoryItemDecorator($0) }
+      appendRecentDecorators(decorators)
+      return !decorators.isEmpty
+    } catch {
+      logger.error("Failed to load more recent rows: \(error.localizedDescription)")
+      nextRecentRowsCursor = nil
+      return false
+    }
+  }
+
+  @MainActor
+  private func shouldLoadMoreRecentRows(after item: HistoryItemDecorator?) -> Bool {
+    guard searchQuery.isEmpty,
+          nextRecentRowsCursor != nil,
+          let item,
+          let index = unpinnedItems.firstIndex(of: item) else {
+      return false
+    }
+
+    return index >= max(unpinnedItems.count - 10, 0)
+  }
+
+  @MainActor
+  private func materialize(_ rows: [PopupHistoryRow]) throws -> [HistoryItem] {
+    try rows.map { row in
+      let item = try popupHistoryStore.materialize(row)
+      popupRowsByMaterializedItemID[ObjectIdentifier(item)] = row
+      return item
+    }
+  }
+
+  @MainActor
+  private func appendRecentDecorators(_ decorators: [HistoryItemDecorator]) {
+    guard !decorators.isEmpty else { return }
+
+    let insertionIndex = all.lastIndex(where: \.isUnpinned).map { all.index(after: $0) } ??
+      all.firstIndex(where: \.isPinned) ?? all.endIndex
+    all.insert(contentsOf: decorators, at: insertionIndex)
+    items = all
+
+    updateUnpinnedShortcuts()
+    AppState.shared.popup.needsResize = true
   }
 
   @MainActor
@@ -240,6 +333,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       }
       all.removeAll()
       sessionLog.removeAll()
+      popupRowsByMaterializedItemID.removeAll()
+      cachedPopupRowIDs.removeAll()
+      nextRecentRowsCursor = nil
       items = all
 
       try? historyStore.deleteAll()
@@ -258,11 +354,16 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
     cleanup(item)
     withLogging("Removing history item") {
-      try? historyStore.delete(item.item)
+      if let row = popupRow(for: item) {
+        try? popupHistoryStore.delete(row)
+      } else {
+        try? historyStore.delete(item.item)
+      }
     }
 
     all.removeAll { $0 == item }
     items.removeAll { $0 == item }
+    popupRowsByMaterializedItemID.removeValue(forKey: ObjectIdentifier(item.item))
     sessionLog.removeValues { $0 == item.item }
 
     updateUnpinnedShortcuts()
@@ -411,7 +512,11 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   func togglePin(_ item: HistoryItemDecorator?) {
     guard let item else { return }
 
-    item.togglePin()
+    let pin = item.item.pin == nil ? nextAvailablePin(excluding: item) : nil
+    item.item.pin = pin
+    if let row = popupRow(for: item) {
+      try? popupHistoryStore.setPin(row, pin: pin)
+    }
 
     let sortedItems = sorter.sort(all.map(\.item))
     if let currentIndex = all.firstIndex(of: item),
@@ -427,6 +532,16 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     if item.isUnpinned {
       AppState.shared.navigator.scrollTarget = item.id
     }
+  }
+
+  @MainActor
+  private func popupRow(for item: HistoryItemDecorator) -> PopupHistoryRow? {
+    popupRowsByMaterializedItemID[ObjectIdentifier(item.item)]
+  }
+
+  private func nextAvailablePin(excluding item: HistoryItemDecorator) -> String {
+    let assignedPins = Set(all.filter { $0 != item }.compactMap(\.item.pin))
+    return HistoryItem.supportedPins.subtracting(assignedPins).sorted().first ?? ""
   }
 
   @MainActor

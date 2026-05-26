@@ -232,6 +232,104 @@ final class ArchiveDatabaseTests: XCTestCase {
     )
   }
 
+  @MainActor
+  func testArchivePopupHistoryStoreLoadsPinnedAndFirstRecentPage() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Pinned", text: "pinned", lastCopiedAt: 300, pin: "p"),
+      historyItem(title: "Older", text: "older", lastCopiedAt: 100),
+      historyItem(title: "Newest", text: "newest", lastCopiedAt: 200),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+
+    let page = try store.loadInitialRows(recentLimit: 1)
+
+    XCTAssertEqual(page.pinnedRows.map(\.title), ["Pinned"])
+    XCTAssertEqual(page.recentRows.map(\.title), ["Newest"])
+    XCTAssertEqual(page.rows.count, 2)
+    XCTAssertEqual(page.pinnedRows.first?.source, .archive(id: 1))
+    XCTAssertEqual(page.pinnedRows.first?.pin, "p")
+    XCTAssertEqual(page.recentRows.first?.contents, [
+      PopupHistoryRowContent(
+        type: NSPasteboard.PasteboardType.string.rawValue,
+        size: 6,
+        hasPayload: true
+      )
+    ])
+  }
+
+  @MainActor
+  func testArchivePopupHistoryStoreLoadsMoreRecentRowsAfterInitialCursor() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Oldest", text: "oldest", lastCopiedAt: 100),
+      historyItem(title: "Middle", text: "middle", lastCopiedAt: 200),
+      historyItem(title: "Newest", text: "newest", lastCopiedAt: 300),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+    let firstPage = try store.loadInitialRows(recentLimit: 2)
+    let cursor = try XCTUnwrap(firstPage.nextRecentCursor)
+
+    let nextPage = try store.loadMoreRecentRows(after: cursor, limit: 2)
+
+    XCTAssertEqual(firstPage.recentRows.map(\.title), ["Newest", "Middle"])
+    XCTAssertEqual(nextPage.rows.map(\.title), ["Oldest"])
+    XCTAssertNil(nextPage.nextCursor)
+  }
+
+  @MainActor
+  func testArchivePopupHistoryStoreMaterializesPayloadForSelection() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Materialized", text: "payload", lastCopiedAt: 200, pin: "m"),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+    let row = try XCTUnwrap(store.loadInitialRows(recentLimit: 1).pinnedRows.first)
+
+    let item = try store.materialize(row)
+
+    XCTAssertEqual(item.title, "Materialized")
+    XCTAssertEqual(item.text, "payload")
+    XCTAssertEqual(item.pin, "m")
+    XCTAssertEqual(item.numberOfCopies, 1)
+    XCTAssertEqual(item.firstCopiedAt, Date(timeIntervalSince1970: 199))
+    XCTAssertEqual(item.lastCopiedAt, Date(timeIntervalSince1970: 200))
+  }
+
+  @MainActor
+  func testArchivePopupHistoryStoreDeletesVisibleRows() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Delete me", text: "delete", lastCopiedAt: 200),
+      historyItem(title: "Keep me", text: "keep", lastCopiedAt: 100),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+    let row = try XCTUnwrap(store.loadInitialRows(recentLimit: 10).recentRows.first)
+
+    try store.delete(row)
+
+    XCTAssertEqual(try database.firstRecentPage(limit: 10).items.map(\.title), ["Keep me"])
+    XCTAssertNotNil(try database.archiveSnapshot().items.first { $0.title == "Delete me" }?.deletedAt)
+  }
+
+  @MainActor
+  func testArchivePopupHistoryStorePinsAndUnpinsVisibleRows() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Pin me", text: "pin", lastCopiedAt: 200),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+    let row = try XCTUnwrap(store.loadInitialRows(recentLimit: 10).recentRows.first)
+
+    try store.setPin(row, pin: "p")
+    XCTAssertEqual(try database.pinnedItems().compactMap(\.pinKey), ["p"])
+    XCTAssertEqual(try database.firstRecentPage(limit: 10).items, [])
+
+    try store.setPin(row, pin: nil)
+    XCTAssertEqual(try database.pinnedItems(), [])
+    XCTAssertEqual(try database.firstRecentPage(limit: 10).items.map(\.title), ["Pin me"])
+  }
+
   private func historyItem(title: String, contents: [HistoryItemContent]) -> HistoryItem {
     let item = HistoryItem(contents: contents)
     item.title = title

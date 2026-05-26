@@ -282,6 +282,226 @@ class SwiftDataHistoryStoreTests: XCTestCase {
 }
 
 @MainActor
+class SwiftDataPopupHistoryStoreTests: XCTestCase {
+  let legacyStore = SwiftDataHistoryStore()
+  lazy var store = SwiftDataPopupHistoryStore(historyStore: legacyStore)
+
+  override func setUpWithError() throws {
+    try legacyStore.deleteAll()
+  }
+
+  override func tearDownWithError() throws {
+    try legacyStore.deleteAll()
+  }
+
+  func testLoadInitialRowsMapsLegacyItemsIntoPopupRows() throws {
+    let pinned = historyItem("pinned")
+    pinned.application = "com.example.Pinned"
+    pinned.firstCopiedAt = Date(timeIntervalSince1970: 1)
+    pinned.lastCopiedAt = Date(timeIntervalSince1970: 2)
+    pinned.numberOfCopies = 3
+    pinned.pin = "p"
+    let recent = historyItem("recent")
+    try legacyStore.insert(pinned)
+    try legacyStore.insert(recent)
+
+    let page = try store.loadInitialRows(recentLimit: 1)
+
+    XCTAssertEqual(page.pinnedRows.map(\.title), ["pinned"])
+    XCTAssertEqual(page.recentRows.map(\.title), ["recent"])
+    let row = try XCTUnwrap(page.pinnedRows.first)
+    XCTAssertEqual(row.source, .legacy(ObjectIdentifier(pinned)))
+    XCTAssertEqual(row.applicationBundleIdentifier, "com.example.Pinned")
+    XCTAssertEqual(row.firstCopiedAt, Date(timeIntervalSince1970: 1))
+    XCTAssertEqual(row.lastCopiedAt, Date(timeIntervalSince1970: 2))
+    XCTAssertEqual(row.numberOfCopies, 3)
+    XCTAssertEqual(row.pin, "p")
+    XCTAssertEqual(row.contents, [
+      PopupHistoryRowContent(
+        type: NSPasteboard.PasteboardType.string.rawValue,
+        size: 6,
+        hasPayload: true
+      )
+    ])
+    XCTAssertTrue(try store.materialize(row) === pinned)
+  }
+
+  private func historyItem(_ value: String) -> HistoryItem {
+    let item = HistoryItem()
+    item.contents = [
+      HistoryItemContent(
+        type: NSPasteboard.PasteboardType.string.rawValue,
+        value: value.data(using: .utf8)
+      )
+    ]
+    item.title = item.generateTitle()
+    return item
+  }
+}
+
+@MainActor
+class PopupHistoryStoreSeamTests: XCTestCase {
+  let savedPageSize = Defaults[.popupRecentPageSize]
+  let savedSize = Defaults[.size]
+  let savedSortBy = Defaults[.sortBy]
+  private var legacyStore: RecordingLegacyHistoryStore!
+  private var popupStore: RecordingPopupHistoryStore!
+
+  override func setUp() {
+    super.setUp()
+    Defaults[.popupRecentPageSize] = 2
+    Defaults[.size] = 10
+    Defaults[.sortBy] = .lastCopiedAt
+    legacyStore = RecordingLegacyHistoryStore()
+    popupStore = RecordingPopupHistoryStore()
+  }
+
+  override func tearDown() {
+    legacyStore = nil
+    popupStore = nil
+    Defaults[.popupRecentPageSize] = savedPageSize
+    Defaults[.size] = savedSize
+    Defaults[.sortBy] = savedSortBy
+    super.tearDown()
+  }
+
+  func testHistoryLoadUsesPopupStoreRowsInsteadOfLegacyLoadAll() async throws {
+    let older = historyItem("older", lastCopiedAt: 1)
+    let newer = historyItem("newer", lastCopiedAt: 2)
+    let rows = [PopupHistoryRow(legacyItem: older), PopupHistoryRow(legacyItem: newer)]
+    popupStore.page = PopupHistoryPage(pinnedRows: [], recentRows: rows)
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+
+    XCTAssertEqual(popupStore.loadedRecentLimits, [2])
+    XCTAssertEqual(popupStore.materializedRowIDs, rows.map(\.id))
+    XCTAssertFalse(legacyStore.didLoadAll)
+    XCTAssertEqual(history.items.map(\.item.title), ["newer", "older"])
+  }
+
+  func testHistoryAppendsNextRecentPageOnDemand() async throws {
+    let newest = historyItem("newest", lastCopiedAt: 3)
+    let middle = historyItem("middle", lastCopiedAt: 2)
+    let oldest = historyItem("oldest", lastCopiedAt: 1)
+    let firstRows = [PopupHistoryRow(legacyItem: newest), PopupHistoryRow(legacyItem: middle)]
+    let nextRows = [PopupHistoryRow(legacyItem: oldest)]
+    let cursor = PopupHistoryPageCursor.archive(ArchiveRecentPageCursor(lastCopiedAt: "2", id: 2))
+    popupStore.page = PopupHistoryPage(pinnedRows: [], recentRows: firstRows, nextRecentCursor: cursor)
+    popupStore.nextRecentPage = PopupHistoryRecentPage(rows: nextRows, nextCursor: nil)
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+    let loaded = await history.loadMoreRecentRowsIfNeeded(after: history.unpinnedItems.last)
+
+    XCTAssertTrue(loaded)
+    XCTAssertEqual(popupStore.loadedMoreRecentLimits, [2])
+    XCTAssertEqual(popupStore.loadedMoreRecentCursors, [cursor])
+    XCTAssertEqual(history.items.map(\.item.title), ["newest", "middle", "oldest"])
+    XCTAssertFalse(legacyStore.didLoadAll)
+  }
+
+  func testHistoryDeleteUsesPopupStoreRowMutation() async throws {
+    let item = historyItem("delete me", lastCopiedAt: 1)
+    let row = PopupHistoryRow(legacyItem: item)
+    popupStore.page = PopupHistoryPage(pinnedRows: [], recentRows: [row])
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+    history.delete(history.items.first)
+
+    XCTAssertEqual(popupStore.deletedRowIDs, [row.id])
+    XCTAssertEqual(history.items.map(\.item.title), [])
+  }
+
+  func testHistoryTogglePinUsesPopupStoreRowMutation() async throws {
+    let item = historyItem("pin me", lastCopiedAt: 1)
+    let row = PopupHistoryRow(legacyItem: item)
+    popupStore.page = PopupHistoryPage(pinnedRows: [], recentRows: [row])
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+    let decorator = try XCTUnwrap(history.items.first)
+    history.togglePin(decorator)
+
+    XCTAssertEqual(popupStore.pinnedRows.map(\.id), [row.id])
+    XCTAssertEqual(popupStore.pinnedRows.first?.pin, decorator.item.pin)
+    XCTAssertNotNil(decorator.item.pin)
+  }
+
+  private func historyItem(_ value: String, lastCopiedAt: TimeInterval) -> HistoryItem {
+    let item = HistoryItem()
+    item.contents = [
+      HistoryItemContent(
+        type: NSPasteboard.PasteboardType.string.rawValue,
+        value: value.data(using: .utf8)
+      )
+    ]
+    item.firstCopiedAt = Date(timeIntervalSince1970: lastCopiedAt)
+    item.lastCopiedAt = Date(timeIntervalSince1970: lastCopiedAt)
+    item.title = item.generateTitle()
+    return item
+  }
+}
+
+@MainActor
+private final class RecordingPopupHistoryStore: PopupHistoryStore {
+  var loadedRecentLimits: [Int] = []
+  var loadedMoreRecentCursors: [PopupHistoryPageCursor] = []
+  var loadedMoreRecentLimits: [Int] = []
+  var materializedRowIDs: [String] = []
+  var deletedRowIDs: [String] = []
+  var pinnedRows: [(id: String, pin: String?)] = []
+  var page = PopupHistoryPage(pinnedRows: [], recentRows: [])
+  var nextRecentPage = PopupHistoryRecentPage(rows: [], nextCursor: nil)
+
+  func loadInitialRows(recentLimit: Int) throws -> PopupHistoryPage {
+    loadedRecentLimits.append(recentLimit)
+    return page
+  }
+
+  func loadMoreRecentRows(after cursor: PopupHistoryPageCursor, limit: Int) throws -> PopupHistoryRecentPage {
+    loadedMoreRecentCursors.append(cursor)
+    loadedMoreRecentLimits.append(limit)
+    return nextRecentPage
+  }
+
+  func materialize(_ row: PopupHistoryRow) throws -> HistoryItem {
+    materializedRowIDs.append(row.id)
+    guard let item = row.materializeLegacyItem() else {
+      throw PopupHistoryStoreError.unsupportedRow(row.id)
+    }
+    return item
+  }
+
+  func delete(_ row: PopupHistoryRow) throws {
+    deletedRowIDs.append(row.id)
+  }
+
+  func setPin(_ row: PopupHistoryRow, pin: String?) throws {
+    pinnedRows.append((id: row.id, pin: pin))
+  }
+}
+
+@MainActor
+private final class RecordingLegacyHistoryStore: LegacyHistoryStore {
+  var didLoadAll = false
+
+  func loadAll() throws -> [HistoryItem] {
+    didLoadAll = true
+    return []
+  }
+
+  func loadDuplicateCandidates(for _: HistoryItem) throws -> [HistoryItem] { [] }
+  func insert(_: HistoryItem) throws {}
+  func delete(_: HistoryItem) throws {}
+  func deleteUnpinned() throws {}
+  func deleteAll() throws {}
+  func countItems() throws -> Int { 0 }
+  func countContents() throws -> Int { 0 }
+}
+
+@MainActor
 class DuplicateCandidateLookupTests: XCTestCase {
   let savedSize = Defaults[.size]
   let savedSortBy = Defaults[.sortBy]

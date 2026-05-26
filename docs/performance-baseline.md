@@ -13,8 +13,10 @@ Issue #2 adds a test-only harness for current history load, search, and add path
 
 For each configured size, the harness records CSV rows for:
 
-- `History.load`
-- `Popup.firstPaintProxy`
+- `History.load.legacy`
+- `History.load.archivePopup`
+- `Popup.firstPaintProxy.legacy`
+- `Popup.firstPaintProxy.archivePopup`
 - `Search.exact`
 - `Search.fuzzy`
 - `Search.regexp`
@@ -24,7 +26,9 @@ For each configured size, the harness records CSV rows for:
 
 Each row includes elapsed milliseconds, resident-memory delta, output count, duplicate rate, long-text controls, and binary-payload controls.
 
-`Popup.firstPaintProxy` is a test-only SwiftUI layout/display proxy for the popup list using an `NSHostingView` at the default 450×800 window size. It does not open the production floating panel or change app behavior.
+`Popup.firstPaintProxy.*` is a test-only SwiftUI layout/display proxy for the popup list using an `NSHostingView` at the default 450×800 window size. It does not open the production floating panel or change app behavior.
+
+`*.archivePopup` rows import synthetic history into a temporary archive DB, then measure popup open through pinned + first recent page DTOs. They should return at most `popupRecentPageSize` rows (default 200), so 10k/100k runs show bounded popup load versus full legacy history load.
 
 ## Synthetic data controls
 
@@ -115,3 +119,21 @@ items,duplicate_rate,long_text_every,long_text_bytes,binary_every,binary_bytes,o
 ```
 
 Memory deltas are point-in-time resident-size deltas; negative rows can occur when runtime cleanup happens during measurement.
+
+Note: historical CSV above predates issue #8 operation renames. New runs emit `.legacy` and `.archivePopup` rows for direct comparison.
+
+## Issue #8 archive popup comparison run
+
+Captured 2026-05-26 on same local macOS/Xcode test host while implementing issue #8.
+
+```csv
+items,duplicate_rate,long_text_every,long_text_bytes,binary_every,binary_bytes,operation,duration_ms,memory_delta_bytes,output_count
+10000,0.1,10,4096,20,1024,History.load.legacy,272.058,47562752,10000
+10000,0.1,10,4096,20,1024,History.load.archivePopup,32.778,4882432,200
+10000,0.1,10,4096,20,1024,Popup.firstPaintProxy.legacy,139.155,32292864,10000
+10000,0.1,10,4096,20,1024,Popup.firstPaintProxy.archivePopup,50.353,5914624,200
+100000,0.1,10,4096,20,1024,History.load.legacy,2653.716,300580864,100000
+100000,0.1,10,4096,20,1024,History.load.archivePopup,57.010,4472832,200
+100000,0.1,10,4096,20,1024,Popup.firstPaintProxy.legacy,846.470,447234048,100000
+100000,0.1,10,4096,20,1024,Popup.firstPaintProxy.archivePopup,36.260,5652480,200
+```
