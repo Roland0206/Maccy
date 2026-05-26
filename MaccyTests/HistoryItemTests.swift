@@ -429,6 +429,44 @@ class PopupHistoryStoreSeamTests: XCTestCase {
     XCTAssertNotNil(decorator.item.pin)
   }
 
+  func testHistoryClearUsesPopupStoreUnpinnedMutationAndPreservesPinnedRows() async throws {
+    let pinned = historyItem("pinned", lastCopiedAt: 2)
+    pinned.pin = "p"
+    let recent = historyItem("recent", lastCopiedAt: 1)
+    let pinnedRow = PopupHistoryRow(legacyItem: pinned)
+    let recentRow = PopupHistoryRow(legacyItem: recent)
+    let cursor = PopupHistoryPageCursor.archive(ArchiveRecentPageCursor(lastCopiedAt: "1", id: 1))
+    popupStore.page = PopupHistoryPage(pinnedRows: [pinnedRow], recentRows: [recentRow], nextRecentCursor: cursor)
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+    history.clear()
+
+    XCTAssertEqual(popupStore.deleteUnpinnedCallCount, 1)
+    XCTAssertFalse(legacyStore.didDeleteUnpinned)
+    XCTAssertEqual(history.items.map(\.item.title), ["pinned"])
+    XCTAssertFalse(history.hasMoreRecentRows)
+  }
+
+  func testHistoryClearAllUsesPopupStoreMutationAndClearsRows() async throws {
+    let pinned = historyItem("pinned", lastCopiedAt: 2)
+    pinned.pin = "p"
+    let recent = historyItem("recent", lastCopiedAt: 1)
+    popupStore.page = PopupHistoryPage(
+      pinnedRows: [PopupHistoryRow(legacyItem: pinned)],
+      recentRows: [PopupHistoryRow(legacyItem: recent)]
+    )
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+    history.clearAll()
+
+    XCTAssertEqual(popupStore.deleteAllCallCount, 1)
+    XCTAssertFalse(legacyStore.didDeleteAll)
+    XCTAssertEqual(history.items, [])
+    XCTAssertFalse(history.hasMoreRecentRows)
+  }
+
   private func historyItem(_ value: String, lastCopiedAt: TimeInterval) -> HistoryItem {
     let item = HistoryItem()
     item.contents = [
@@ -451,6 +489,8 @@ private final class RecordingPopupHistoryStore: PopupHistoryStore {
   var loadedMoreRecentLimits: [Int] = []
   var materializedRowIDs: [String] = []
   var deletedRowIDs: [String] = []
+  var deleteUnpinnedCallCount = 0
+  var deleteAllCallCount = 0
   var pinnedRows: [(id: String, pin: String?)] = []
   var page = PopupHistoryPage(pinnedRows: [], recentRows: [])
   var nextRecentPage = PopupHistoryRecentPage(rows: [], nextCursor: nil)
@@ -478,6 +518,14 @@ private final class RecordingPopupHistoryStore: PopupHistoryStore {
     deletedRowIDs.append(row.id)
   }
 
+  func deleteUnpinned() throws {
+    deleteUnpinnedCallCount += 1
+  }
+
+  func deleteAll() throws {
+    deleteAllCallCount += 1
+  }
+
   func setPin(_ row: PopupHistoryRow, pin: String?) throws {
     pinnedRows.append((id: row.id, pin: pin))
   }
@@ -486,6 +534,8 @@ private final class RecordingPopupHistoryStore: PopupHistoryStore {
 @MainActor
 private final class RecordingLegacyHistoryStore: LegacyHistoryStore {
   var didLoadAll = false
+  var didDeleteUnpinned = false
+  var didDeleteAll = false
 
   func loadAll() throws -> [HistoryItem] {
     didLoadAll = true
@@ -495,8 +545,8 @@ private final class RecordingLegacyHistoryStore: LegacyHistoryStore {
   func loadDuplicateCandidates(for _: HistoryItem) throws -> [HistoryItem] { [] }
   func insert(_: HistoryItem) throws {}
   func delete(_: HistoryItem) throws {}
-  func deleteUnpinned() throws {}
-  func deleteAll() throws {}
+  func deleteUnpinned() throws { didDeleteUnpinned = true }
+  func deleteAll() throws { didDeleteAll = true }
   func countItems() throws -> Int { 0 }
   func countContents() throws -> Int { 0 }
 }
