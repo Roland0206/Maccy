@@ -224,6 +224,11 @@ struct ArchiveExternalPayload: Equatable {
   let relativePath: String
 }
 
+struct ArchivePayloadFile: Equatable {
+  let relativePath: String
+  let byteCount: Int
+}
+
 struct ArchivePayloadStore {
   static let defaultRootDirectory = URL.applicationSupportDirectory.appending(path: "Maccy/Payloads")
 
@@ -254,6 +259,49 @@ struct ArchivePayloadStore {
     return try Data(contentsOf: fileURL)
   }
 
+  func files() throws -> [ArchivePayloadFile] {
+    guard FileManager.default.fileExists(atPath: rootDirectory.path) else { return [] }
+    guard let enumerator = FileManager.default.enumerator(
+      at: rootDirectory,
+      includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey]
+    ) else { return [] }
+
+    var files: [ArchivePayloadFile] = []
+    for case let fileURL as URL in enumerator {
+      let values = try fileURL.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+      guard values.isDirectory == false, let relativePath = relativePath(for: fileURL) else { continue }
+      files.append(ArchivePayloadFile(relativePath: relativePath, byteCount: values.fileSize ?? 0))
+    }
+
+    return files.sorted { $0.relativePath < $1.relativePath }
+  }
+
+  func delete(relativePath: String) throws {
+    let fileURL = fileURL(forRelativePath: relativePath)
+    guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+    try FileManager.default.removeItem(at: fileURL)
+  }
+
+  func removeEmptyDirectories() throws {
+    guard FileManager.default.fileExists(atPath: rootDirectory.path) else { return }
+    guard let enumerator = FileManager.default.enumerator(
+      at: rootDirectory,
+      includingPropertiesForKeys: [.isDirectoryKey]
+    ) else { return }
+
+    let directories = try enumerator.compactMap { item -> URL? in
+      guard let directoryURL = item as? URL else { return nil }
+      let values = try directoryURL.resourceValues(forKeys: [.isDirectoryKey])
+      return values.isDirectory == true ? directoryURL : nil
+    }
+
+    for directoryURL in directories.sorted(by: { $0.path.count > $1.path.count }) {
+      if try FileManager.default.contentsOfDirectory(atPath: directoryURL.path).isEmpty {
+        try FileManager.default.removeItem(at: directoryURL)
+      }
+    }
+  }
+
   func fileURL(forRelativePath relativePath: String) -> URL {
     rootDirectory.appending(path: relativePath)
   }
@@ -281,6 +329,13 @@ struct ArchivePayloadStore {
       try? FileManager.default.removeItem(at: temporaryURL)
       throw error
     }
+  }
+
+  private func relativePath(for fileURL: URL) -> String? {
+    let rootPath = rootDirectory.standardizedFileURL.path
+    let filePath = fileURL.standardizedFileURL.path
+    guard filePath.hasPrefix("\(rootPath)/") else { return nil }
+    return String(filePath.dropFirst(rootPath.count + 1))
   }
 }
 
@@ -526,6 +581,44 @@ final class ArchiveDatabase {
   func representationColumnNames() throws -> [String] {
     try pool.read { db in
       try String.fetchAll(db, sql: "SELECT name FROM pragma_table_info('clipboard_representations')")
+    }
+  }
+
+  func orphanedExternalPayloadFiles() throws -> [ArchivePayloadFile] {
+    let referencedPaths = try referencedExternalPayloadRelativePaths()
+    return try payloadStore.files().filter { !referencedPaths.contains($0.relativePath) }
+  }
+
+  @discardableResult
+  func cleanupOrphanedExternalPayloadFiles() throws -> [ArchivePayloadFile] {
+    let orphans = try orphanedExternalPayloadFiles()
+    for orphan in orphans {
+      try payloadStore.delete(relativePath: orphan.relativePath)
+    }
+    try payloadStore.removeEmptyDirectories()
+    return orphans
+  }
+
+  @discardableResult
+  func deleteItemPermanently(id: Int64) throws -> [ArchivePayloadFile] {
+    try pool.write { db in
+      try db.execute(sql: "DELETE FROM clipboard_items WHERE id = ?", arguments: [id])
+    }
+    return try cleanupOrphanedExternalPayloadFiles()
+  }
+
+  private func referencedExternalPayloadRelativePaths() throws -> Set<String> {
+    try pool.read { db in
+      Set(try String.fetchAll(
+        db,
+        sql: """
+          SELECT DISTINCT relative_path
+          FROM clipboard_representations
+          WHERE storage_kind = ?
+            AND relative_path IS NOT NULL
+        """,
+        arguments: [ArchivePayloadStorageKind.external.rawValue]
+      ))
     }
   }
 

@@ -218,6 +218,91 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertEqual(try payloadFileCount(in: payloadStore.rootDirectory), 1)
   }
 
+  @MainActor
+  func testFindsExternalPayloadFilesNotReferencedByArchive() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    _ = try database.importLegacyHistoryItems([
+      historyItem(
+        title: "Referenced",
+        contents: [content(.string, Data("referenced payload".utf8))]
+      ),
+    ])
+    let orphanData = Data("orphan payload".utf8)
+    let orphan = try payloadStore.write(orphanData)
+
+    let orphans = try database.orphanedExternalPayloadFiles()
+
+    XCTAssertEqual(orphans, [
+      ArchivePayloadFile(relativePath: orphan.relativePath, byteCount: orphanData.count),
+    ])
+  }
+
+  @MainActor
+  func testCleanupRemovesOnlyUnreferencedExternalPayloadFiles() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let referencedData = Data("referenced payload".utf8)
+    _ = try database.importLegacyHistoryItems([
+      historyItem(title: "Referenced", contents: [content(.string, referencedData)]),
+    ])
+    let referencedPath = try XCTUnwrap(database.archiveSnapshot().items.first?.representations.first?.relativePath)
+    let orphanData = Data("orphan payload".utf8)
+    let orphan = try payloadStore.write(orphanData)
+
+    let deleted = try database.cleanupOrphanedExternalPayloadFiles()
+
+    XCTAssertEqual(deleted, [
+      ArchivePayloadFile(relativePath: orphan.relativePath, byteCount: orphanData.count),
+    ])
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: payloadStore.fileURL(forRelativePath: orphan.relativePath).path
+    ))
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: payloadStore.fileURL(forRelativePath: referencedPath).path
+    ))
+    XCTAssertEqual(try database.orphanedExternalPayloadFiles(), [])
+  }
+
+  @MainActor
+  func testPermanentDeleteCleansExternalPayloadAfterLastReferenceIsRemoved() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let sharedData = Data("shared delete payload".utf8)
+    _ = try database.importLegacyHistoryItems([
+      historyItem(title: "First", contents: [content(.string, sharedData)]),
+      historyItem(title: "Second", contents: [content(.string, sharedData)]),
+    ])
+    let snapshot = try database.archiveSnapshot()
+    let firstID = try itemID(titled: "First", in: snapshot)
+    let secondID = try itemID(titled: "Second", in: snapshot)
+    let relativePath = try XCTUnwrap(snapshot.items.first?.representations.first?.relativePath)
+
+    XCTAssertEqual(try database.deleteItemPermanently(id: firstID), [])
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: payloadStore.fileURL(forRelativePath: relativePath).path
+    ))
+
+    let deleted = try database.deleteItemPermanently(id: secondID)
+
+    XCTAssertEqual(deleted, [ArchivePayloadFile(relativePath: relativePath, byteCount: sharedData.count)])
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: payloadStore.fileURL(forRelativePath: relativePath).path
+    ))
+  }
+
   func testFTS5CapabilitySmokeTest() throws {
     let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
     let health = try database.healthCheck()
