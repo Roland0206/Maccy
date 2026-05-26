@@ -21,16 +21,10 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   var searchQuery: String = "" {
     didSet {
+      let query = searchQuery
+      searchTask?.cancel()
       throttler.throttle { [self] in
-        updateItems(search.search(string: searchQuery, within: all))
-
-        if searchQuery.isEmpty {
-          AppState.shared.navigator.select(item: unpinnedItems.first)
-        } else {
-          AppState.shared.navigator.highlightFirst()
-        }
-
-        AppState.shared.popup.needsResize = true
+        startSearch(query: query)
       }
     }
   }
@@ -67,6 +61,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @ObservationIgnored
   private var isLoadingMoreRecentRows = false
+
+  @ObservationIgnored
+  private var searchTask: Task<Void, Never>?
 
   @ObservationIgnored
   private var cachedPopupRowIDs = Set<String>()
@@ -570,15 +567,89 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     return nil
   }
 
-  private func updateItems(_ newItems: [Search.SearchResult]) {
+  private func startSearch(query: String) {
+    searchTask?.cancel()
+    searchTask = Task { [self] in
+      await runSearch(query: query)
+    }
+  }
+
+  private func runSearch(query: String) async {
+    guard !Task.isCancelled else { return }
+
+    if query.isEmpty {
+      items = all
+      finishSearch(query: query)
+      return
+    }
+
+    guard let archiveSearchStore = popupHistoryStore as? any ArchiveSearchHistoryStore else {
+      updateItems(search.search(string: query, within: all), query: query)
+      finishSearch(query: query)
+      return
+    }
+
+    do {
+      let page = try await archiveSearchStore.search(ArchiveSearchRequest(
+        query: query,
+        mode: archiveSearchMode,
+        limit: Defaults[.popupRecentPageSize]
+      ))
+      guard !Task.isCancelled, searchQuery == query else { return }
+
+      let results = try await materialize(page.rows)
+      guard !Task.isCancelled, searchQuery == query else { return }
+
+      items = results.map { item in
+        let decorator = HistoryItemDecorator(item)
+        decorator.highlight(query, [])
+        return decorator
+      }
+      updateUnpinnedShortcuts()
+      finishSearch(query: query)
+    } catch is CancellationError {
+      return
+    } catch {
+      logger.error("Failed to search archive history: \(error.localizedDescription)")
+    }
+  }
+
+  private var archiveSearchMode: ArchiveSearchMode {
+    switch Defaults[.searchMode] {
+    case .fuzzy:
+      return .fuzzy
+    case .regexp:
+      return .regexp
+    case .mixed:
+      return .mixed
+    default:
+      return .exact
+    }
+  }
+
+  private func updateItems(_ newItems: [Search.SearchResult], query: String) {
+    guard searchQuery == query else { return }
+
     items = newItems.map { result in
       let item = result.object
-      item.highlight(searchQuery, result.ranges)
+      item.highlight(query, result.ranges)
 
       return item
     }
 
     updateUnpinnedShortcuts()
+  }
+
+  private func finishSearch(query: String) {
+    guard searchQuery == query else { return }
+
+    if query.isEmpty {
+      AppState.shared.navigator.select(item: unpinnedItems.first)
+    } else {
+      AppState.shared.navigator.highlightFirst()
+    }
+
+    AppState.shared.popup.needsResize = true
   }
 
   private func updateShortcuts() {

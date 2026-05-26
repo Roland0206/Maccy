@@ -109,6 +109,11 @@ struct PopupHistoryRecentPage: Equatable {
   let nextCursor: PopupHistoryPageCursor?
 }
 
+struct PopupHistorySearchPage: Equatable {
+  let rows: [PopupHistoryRow]
+  let nextOffset: Int?
+}
+
 struct PopupHistoryPage: Equatable {
   let pinnedRows: [PopupHistoryRow]
   let recentRows: [PopupHistoryRow]
@@ -140,6 +145,11 @@ protocol PopupHistoryStore {
   func deleteUnpinned() throws
   func deleteAll() throws
   func setPin(_ row: PopupHistoryRow, pin: String?) throws
+}
+
+@MainActor
+protocol ArchiveSearchHistoryStore {
+  func search(_ request: ArchiveSearchRequest) async throws -> PopupHistorySearchPage
 }
 
 @MainActor
@@ -217,7 +227,7 @@ struct SwiftDataPopupHistoryStore: PopupHistoryStore {
   }
 }
 
-struct ArchivePopupHistoryStore: PopupHistoryStore {
+struct ArchivePopupHistoryStore: PopupHistoryStore, ArchiveSearchHistoryStore {
   nonisolated(unsafe) private let database: ArchiveDatabase
 
   nonisolated init(database: ArchiveDatabase) {
@@ -251,12 +261,28 @@ struct ArchivePopupHistoryStore: PopupHistoryStore {
 
   @MainActor
   func materialize(_ row: PopupHistoryRow) throws -> HistoryItem {
-    guard case .archive = row.source,
-          let item = row.materializeArchiveItem() else {
+    guard case let .archive(id) = row.source,
+          let item = try database.item(id: id) else {
       throw PopupHistoryStoreError.unsupportedRow(row.id)
     }
 
-    return item
+    guard let materializedItem = PopupHistoryRow(archiveItem: item).materializeArchiveItem() else {
+      throw PopupHistoryStoreError.unsupportedRow(row.id)
+    }
+
+    return materializedItem
+  }
+
+  @MainActor
+  func search(_ request: ArchiveSearchRequest) async throws -> PopupHistorySearchPage {
+    try Task.checkCancellation()
+    let page = try database.search(request)
+    try Task.checkCancellation()
+
+    return PopupHistorySearchPage(
+      rows: page.items.map { PopupHistoryRow(archiveItem: $0) },
+      nextOffset: page.nextOffset
+    )
   }
 
   @MainActor

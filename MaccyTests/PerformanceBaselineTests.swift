@@ -119,11 +119,23 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
 
       let archiveDatabaseURL = temporaryArchiveDatabaseURL()
       defer { removeArchiveDatabaseFiles(at: archiveDatabaseURL) }
-      let archiveHistory = try makeArchivePopupHistory(items: seededItems, databaseURL: archiveDatabaseURL)
+      let archiveDatabase = try makeArchiveDatabase(items: seededItems, databaseURL: archiveDatabaseURL)
+      let archiveHistory = makeArchivePopupHistory(database: archiveDatabase)
       measurements.append(try await measure(config: config, operation: "History.load.archivePopup") {
         try await archiveHistory.load()
         return archiveHistory.all.count
       })
+
+      for mode in archiveSearchModes {
+        measurements.append(try measure(config: config, operation: "ArchiveSearch.\(operationName(for: mode))") {
+          try archiveDatabase.search(ArchiveSearchRequest(
+            query: query(for: mode),
+            mode: mode,
+            limit: Defaults[.popupRecentPageSize],
+            candidateLimit: Defaults[.popupRecentPageSize]
+          )).items.count
+        })
+      }
 
       measurements.append(measure(config: config, operation: "Popup.firstPaintProxy.legacy") {
         measurePopupFirstPaintProxy(history: history)
@@ -156,10 +168,18 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
     return measurements
   }
 
-  private func makeArchivePopupHistory(items: [HistoryItem], databaseURL: URL) throws -> History {
+  private var archiveSearchModes: [ArchiveSearchMode] {
+    [.exact, .prefix, .fuzzy, .regexp]
+  }
+
+  private func makeArchiveDatabase(items: [HistoryItem], databaseURL: URL) throws -> ArchiveDatabase {
     let database = try ArchiveDatabase.open(at: databaseURL)
     _ = try database.importLegacyHistoryItems(items)
-    return History(
+    return database
+  }
+
+  private func makeArchivePopupHistory(database: ArchiveDatabase) -> History {
+    History(
       historyStore: InMemoryHistoryStore(items: []),
       popupHistoryStore: ArchivePopupHistoryStore(database: database)
     )
@@ -224,6 +244,36 @@ final class PerformanceBaselineTests: XCTestCase { // swiftlint:disable:this typ
       "needle-[0-9]{6}"
     case .mixed:
       "needle-[0-9]{6}"
+    }
+  }
+
+  private func query(for mode: ArchiveSearchMode) -> String {
+    switch mode {
+    case .exact:
+      "needle-000001"
+    case .prefix:
+      "needle-000"
+    case .fuzzy:
+      "neelde"
+    case .regexp:
+      "needle-[0-9]{6}"
+    case .mixed:
+      "needle-[0-9]{6}"
+    }
+  }
+
+  private func operationName(for mode: ArchiveSearchMode) -> String {
+    switch mode {
+    case .exact:
+      "exact"
+    case .prefix:
+      "prefix"
+    case .fuzzy:
+      "fuzzy"
+    case .regexp:
+      "regexp"
+    case .mixed:
+      "mixed"
     }
   }
 
