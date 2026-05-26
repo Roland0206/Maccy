@@ -59,6 +59,14 @@ class Footer: ItemsContainer {
         }
       },
       FooterItem(
+        title: "archive",
+        help: "archive_tooltip"
+      ) {
+        Task { @MainActor in
+          AppState.shared.openArchiveMode()
+        }
+      },
+      FooterItem(
         title: "preferences",
         shortcuts: [KeyShortcut(key: .comma)]
       ) {

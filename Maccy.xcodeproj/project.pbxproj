@@ -20,6 +20,9 @@
 		2F12271E2E5C932200A1592A /* Logging in Frameworks */ = {isa = PBXBuildFile; productRef = 2F12271D2E5C932200A1592A /* Logging */; };
 		2F6A00022F30000000000005 /* ArchiveDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00012F30000000000005 /* ArchiveDatabase.swift */; };
 		2F6A00042F30000000000005 /* ArchiveDatabaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00032F30000000000005 /* ArchiveDatabaseTests.swift */; };
+		2F6A00112F30001100000001 /* ArchiveMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00102F30001100000001 /* ArchiveMode.swift */; };
+		2F6A00132F30001100000001 /* ArchiveModeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00122F30001100000001 /* ArchiveModeView.swift */; };
+		2F6A00152F30001100000001 /* ArchiveModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00142F30001100000001 /* ArchiveModeTests.swift */; };
 		2F6A00072F30000000000005 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 2F6A00062F30000000000005 /* GRDB */; };
 		2F162E802F1E7B30001FBAFF /* PasteStackPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F162E7F2F1E7B28001FBAFF /* PasteStackPreviewView.swift */; };
 		2F1A79C02C6DFB7800C98EBD /* SearchVisibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F1A79BF2C6DFB7800C98EBD /* SearchVisibility.swift */; };
@@ -201,6 +204,9 @@
 		2F578C3E2EFFE8720088B759 /* SlideoutController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideoutController.swift; sourceTree = "<group>"; };
 		2F6A00012F30000000000005 /* ArchiveDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveDatabase.swift; sourceTree = "<group>"; };
 		2F6A00032F30000000000005 /* ArchiveDatabaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveDatabaseTests.swift; sourceTree = "<group>"; };
+		2F6A00102F30001100000001 /* ArchiveMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveMode.swift; sourceTree = "<group>"; };
+		2F6A00122F30001100000001 /* ArchiveModeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveModeView.swift; sourceTree = "<group>"; };
+		2F6A00142F30001100000001 /* ArchiveModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveModeTests.swift; sourceTree = "<group>"; };
 		2F578C402EFFE8920088B759 /* SlideoutContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideoutContentView.swift; sourceTree = "<group>"; };
 		2F578C412EFFE8920088B759 /* SlideoutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideoutView.swift; sourceTree = "<group>"; };
 		2F8B9DE52C5D6E5D0046EF69 /* NSPoint+DefaultsSerializable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NSPoint+DefaultsSerializable.swift"; sourceTree = "<group>"; };
@@ -678,6 +684,7 @@
 			isa = PBXGroup;
 			children = (
 				2F1091D62F2B6E8100F5C454 /* AsyncView.swift */,
+				2F6A00122F30001100000001 /* ArchiveModeView.swift */,
 				2FF2E94F2E7808420093D72C /* AppImageView.swift */,
 				DAA072DE2C41C63C006DDFD2 /* ConfirmationView.swift */,
 				DA243D112C2F64820012A27F /* ContentView.swift */,
@@ -725,6 +732,7 @@
 			children = (
 				DA48AE852A5F0077006D4894 /* Fixtures */,
 				2F6A00032F30000000000005 /* ArchiveDatabaseTests.swift */,
+				2F6A00142F30001100000001 /* ArchiveModeTests.swift */,
 				DA3CE7FF1E44A62500B3AA98 /* ClipboardTests.swift */,
 				DAE2850123225BD90080E394 /* ColorImageTests.swift */,
 				DA360DB21E3DF137005C6F6B /* HistoryTests.swift */,
@@ -825,6 +833,7 @@
 				DA6D98E12AEABE03008A77CE /* Accessibility.swift */,
 				DAEE38461E3DBEB100DD2966 /* AppDelegate.swift */,
 				2F6A00012F30000000000005 /* ArchiveDatabase.swift */,
+				2F6A00102F30001100000001 /* ArchiveMode.swift */,
 				DAB082952A2B7B850053E463 /* AppStoreReview.swift */,
 				2FB5BC9F2CD8F73C008B33F4 /* ApplicationImage.swift */,
 				DA555F072CF0F98F009608BD /* ApplicationImageCache.swift */,
@@ -1071,6 +1080,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				2F6A00042F30000000000005 /* ArchiveDatabaseTests.swift in Sources */,
+				2F6A00152F30001100000001 /* ArchiveModeTests.swift in Sources */,
 				DAFE2DE9268A9B1B00990986 /* HistoryItemTests.swift in Sources */,
 				DA3CE8001E44A62500B3AA98 /* ClipboardTests.swift in Sources */,
 				DA1EDE432045B35300479723 /* HistoryDecoratorTests.swift in Sources */,
@@ -1087,6 +1097,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				2F6A00022F30000000000005 /* ArchiveDatabase.swift in Sources */,
+				2F6A00112F30001100000001 /* ArchiveMode.swift in Sources */,
+				2F6A00132F30001100000001 /* ArchiveModeView.swift in Sources */,
 				DA19691C2C3F3EAC00258481 /* Collection+Surrounding.swift in Sources */,
 				DA1969142C3F11D600258481 /* PreviewItemView.swift in Sources */,
 				2FF2E9502E7808470093D72C /* AppImageView.swift in Sources */,
