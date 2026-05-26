@@ -137,6 +137,8 @@ protocol PopupHistoryStore {
   func loadMoreRecentRows(after cursor: PopupHistoryPageCursor, limit: Int) throws -> PopupHistoryRecentPage
   func materialize(_ row: PopupHistoryRow) throws -> HistoryItem
   func delete(_ row: PopupHistoryRow) throws
+  func deleteUnpinned() throws
+  func deleteAll() throws
   func setPin(_ row: PopupHistoryRow, pin: String?) throws
 }
 
@@ -192,6 +194,16 @@ struct SwiftDataPopupHistoryStore: PopupHistoryStore {
     }
 
     try historyStore.delete(item)
+  }
+
+  @MainActor
+  func deleteUnpinned() throws {
+    try historyStore.deleteUnpinned()
+  }
+
+  @MainActor
+  func deleteAll() throws {
+    try historyStore.deleteAll()
   }
 
   @MainActor
@@ -254,6 +266,16 @@ struct ArchivePopupHistoryStore: PopupHistoryStore {
     }
 
     try database.softDeleteItem(id: id)
+  }
+
+  @MainActor
+  func deleteUnpinned() throws {
+    try database.softDeleteUnpinnedItems()
+  }
+
+  @MainActor
+  func deleteAll() throws {
+    try database.softDeleteAllItems()
   }
 
   @MainActor

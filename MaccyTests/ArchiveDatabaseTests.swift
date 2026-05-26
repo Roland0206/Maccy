@@ -330,6 +330,42 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertEqual(try database.firstRecentPage(limit: 10).items.map(\.title), ["Pin me"])
   }
 
+  @MainActor
+  func testArchivePopupHistoryStoreDeletesUnpinnedRowsForClear() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    _ = try database.importLegacyHistoryItems([
+      historyItem(title: "Pinned", text: "pinned", lastCopiedAt: 300, pin: "p"),
+      historyItem(title: "Recent", text: "recent", lastCopiedAt: 200),
+      historyItem(title: "Older", text: "older", lastCopiedAt: 100),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+
+    try store.deleteUnpinned()
+
+    XCTAssertEqual(try database.pinnedItems().map(\.title), ["Pinned"])
+    XCTAssertEqual(try database.firstRecentPage(limit: 10).items, [])
+    let snapshot = try database.archiveSnapshot()
+    XCTAssertNil(snapshot.items.first { $0.title == "Pinned" }?.deletedAt)
+    XCTAssertNotNil(snapshot.items.first { $0.title == "Recent" }?.deletedAt)
+    XCTAssertNotNil(snapshot.items.first { $0.title == "Older" }?.deletedAt)
+  }
+
+  @MainActor
+  func testArchivePopupHistoryStoreDeletesAllRowsForClearAll() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    _ = try database.importLegacyHistoryItems([
+      historyItem(title: "Pinned", text: "pinned", lastCopiedAt: 300, pin: "p"),
+      historyItem(title: "Recent", text: "recent", lastCopiedAt: 200),
+    ])
+    let store = ArchivePopupHistoryStore(database: database)
+
+    try store.deleteAll()
+
+    XCTAssertEqual(try database.pinnedItems(), [])
+    XCTAssertEqual(try database.firstRecentPage(limit: 10).items, [])
+    XCTAssertTrue(try database.archiveSnapshot().items.allSatisfy { $0.deletedAt != nil })
+  }
+
   private func historyItem(title: String, contents: [HistoryItemContent]) -> HistoryItem {
     let item = HistoryItem(contents: contents)
     item.title = title

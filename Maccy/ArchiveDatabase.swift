@@ -252,6 +252,37 @@ final class ArchiveDatabase {
     }
   }
 
+  func softDeleteUnpinnedItems(at deletedAt: Date = Date()) throws {
+    try pool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE clipboard_items
+          SET deleted_at = ?
+          WHERE deleted_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM pins
+              WHERE pins.item_id = clipboard_items.id
+            )
+        """,
+        arguments: [Self.archiveTimestamp(deletedAt)]
+      )
+    }
+  }
+
+  func softDeleteAllItems(at deletedAt: Date = Date()) throws {
+    try pool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE clipboard_items
+          SET deleted_at = ?
+          WHERE deleted_at IS NULL
+        """,
+        arguments: [Self.archiveTimestamp(deletedAt)]
+      )
+    }
+  }
+
   func setPin(itemID: Int64, pin: String?, title: String?, at updatedAt: Date = Date()) throws {
     try pool.write { db in
       guard let pin, !pin.isEmpty else {

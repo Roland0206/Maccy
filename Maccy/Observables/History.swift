@@ -306,16 +306,15 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @MainActor
   func clear() {
     withLogging("Clearing history") {
-      all.forEach { item in
-        if item.isUnpinned {
-          cleanup(item)
-        }
-      }
+      let unpinnedItems = all.filter(\.isUnpinned)
+      unpinnedItems.forEach(cleanup)
+      removeCachedRows(for: unpinnedItems)
       all.removeAll(where: \.isUnpinned)
       sessionLog.removeValues { $0.pin == nil }
+      nextRecentRowsCursor = nil
       items = all
 
-      try? historyStore.deleteUnpinned()
+      try? popupHistoryStore.deleteUnpinned()
     }
 
     Clipboard.shared.clear()
@@ -338,7 +337,7 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
       nextRecentRowsCursor = nil
       items = all
 
-      try? historyStore.deleteAll()
+      try? popupHistoryStore.deleteAll()
     }
 
     Clipboard.shared.clear()
@@ -375,6 +374,15 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @MainActor
   private func cleanup(_ item: HistoryItemDecorator) {
     item.cleanupImages()
+  }
+
+  @MainActor
+  private func removeCachedRows(for items: [HistoryItemDecorator]) {
+    for item in items {
+      if let row = popupRowsByMaterializedItemID.removeValue(forKey: ObjectIdentifier(item.item)) {
+        cachedPopupRowIDs.remove(row.id)
+      }
+    }
   }
 
   private func currentModifierFlags() -> NSEvent.ModifierFlags {
