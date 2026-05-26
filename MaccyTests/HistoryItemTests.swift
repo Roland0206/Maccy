@@ -344,6 +344,7 @@ class PopupHistoryStoreSeamTests: XCTestCase {
   let savedPageSize = Defaults[.popupRecentPageSize]
   let savedSize = Defaults[.size]
   let savedSortBy = Defaults[.sortBy]
+  let savedSearchMode = Defaults[.searchMode]
   private var legacyStore: RecordingLegacyHistoryStore!
   private var popupStore: RecordingPopupHistoryStore!
 
@@ -352,6 +353,7 @@ class PopupHistoryStoreSeamTests: XCTestCase {
     Defaults[.popupRecentPageSize] = 2
     Defaults[.size] = 10
     Defaults[.sortBy] = .lastCopiedAt
+    Defaults[.searchMode] = .exact
     legacyStore = RecordingLegacyHistoryStore()
     popupStore = RecordingPopupHistoryStore()
   }
@@ -362,6 +364,7 @@ class PopupHistoryStoreSeamTests: XCTestCase {
     Defaults[.popupRecentPageSize] = savedPageSize
     Defaults[.size] = savedSize
     Defaults[.sortBy] = savedSortBy
+    Defaults[.searchMode] = savedSearchMode
     super.tearDown()
   }
 
@@ -399,6 +402,47 @@ class PopupHistoryStoreSeamTests: XCTestCase {
     XCTAssertEqual(popupStore.loadedMoreRecentCursors, [cursor])
     XCTAssertEqual(history.items.map(\.item.title), ["newest", "middle", "oldest"])
     XCTAssertFalse(legacyStore.didLoadAll)
+  }
+
+  func testHistorySearchUsesArchiveSearchStoreRows() async throws {
+    let cached = historyItem("cached", lastCopiedAt: 1)
+    let result = historyItem("needle result", lastCopiedAt: 2)
+    let resultRow = PopupHistoryRow(legacyItem: result)
+    popupStore.page = PopupHistoryPage(pinnedRows: [], recentRows: [PopupHistoryRow(legacyItem: cached)])
+    popupStore.searchPages["needle"] = PopupHistorySearchPage(rows: [resultRow], nextOffset: nil)
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+    history.searchQuery = "needle"
+    try await Task.sleep(nanoseconds: 400_000_000)
+
+    XCTAssertEqual(popupStore.searchRequests.map(\.query), ["needle"])
+    XCTAssertEqual(history.items.map(\.item.title), ["needle result"])
+    XCTAssertEqual(history.all.map(\.item.title), ["cached"])
+  }
+
+  func testHistorySearchCancelsStaleArchiveQueriesBeforePublishing() async throws {
+    let oldResult = historyItem("old result", lastCopiedAt: 1)
+    let newResult = historyItem("new result", lastCopiedAt: 2)
+    popupStore.searchPages["old"] = PopupHistorySearchPage(
+      rows: [PopupHistoryRow(legacyItem: oldResult)],
+      nextOffset: nil
+    )
+    popupStore.searchPages["new"] = PopupHistorySearchPage(
+      rows: [PopupHistoryRow(legacyItem: newResult)],
+      nextOffset: nil
+    )
+    popupStore.searchDelays["old"] = 500_000_000
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+    history.searchQuery = "old"
+    try await Task.sleep(nanoseconds: 300_000_000)
+    history.searchQuery = "new"
+    try await Task.sleep(nanoseconds: 700_000_000)
+
+    XCTAssertEqual(popupStore.searchRequests.map(\.query), ["old", "new"])
+    XCTAssertEqual(history.items.map(\.item.title), ["new result"])
   }
 
   func testHistoryDeleteUsesPopupStoreRowMutation() async throws {
@@ -483,7 +527,7 @@ class PopupHistoryStoreSeamTests: XCTestCase {
 }
 
 @MainActor
-private final class RecordingPopupHistoryStore: PopupHistoryStore {
+private final class RecordingPopupHistoryStore: PopupHistoryStore, ArchiveSearchHistoryStore {
   var loadedRecentLimits: [Int] = []
   var loadedMoreRecentCursors: [PopupHistoryPageCursor] = []
   var loadedMoreRecentLimits: [Int] = []
@@ -492,6 +536,9 @@ private final class RecordingPopupHistoryStore: PopupHistoryStore {
   var deleteUnpinnedCallCount = 0
   var deleteAllCallCount = 0
   var pinnedRows: [(id: String, pin: String?)] = []
+  var searchRequests: [ArchiveSearchRequest] = []
+  var searchPages: [String: PopupHistorySearchPage] = [:]
+  var searchDelays: [String: UInt64] = [:]
   var page = PopupHistoryPage(pinnedRows: [], recentRows: [])
   var nextRecentPage = PopupHistoryRecentPage(rows: [], nextCursor: nil)
 
@@ -512,6 +559,14 @@ private final class RecordingPopupHistoryStore: PopupHistoryStore {
       throw PopupHistoryStoreError.unsupportedRow(row.id)
     }
     return item
+  }
+
+  func search(_ request: ArchiveSearchRequest) async throws -> PopupHistorySearchPage {
+    searchRequests.append(request)
+    if let delay = searchDelays[request.query] {
+      try await Task.sleep(nanoseconds: delay)
+    }
+    return searchPages[request.query] ?? PopupHistorySearchPage(rows: [], nextOffset: nil)
   }
 
   func delete(_ row: PopupHistoryRow) throws {

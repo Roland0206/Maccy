@@ -17,6 +17,7 @@ struct ArchiveDatabaseHealth: Equatable {
       "source_apps",
       "clipboard_items",
       "clipboard_representations",
+      "clipboard_search_documents",
       "clipboard_search_docs",
       "pins",
       "tombstones",
@@ -54,6 +55,43 @@ struct ArchiveRecentPage: Equatable {
   let nextCursor: ArchiveRecentPageCursor?
 
   var hasMore: Bool { nextCursor != nil }
+}
+
+enum ArchiveSearchMode: Equatable {
+  case exact
+  case prefix
+  case fuzzy
+  case regexp
+  case mixed
+}
+
+struct ArchiveSearchRequest: Equatable {
+  let query: String
+  let mode: ArchiveSearchMode
+  let limit: Int
+  let offset: Int
+  let candidateLimit: Int
+
+  init(
+    query: String,
+    mode: ArchiveSearchMode,
+    limit: Int,
+    offset: Int = 0,
+    candidateLimit: Int = 500
+  ) {
+    self.query = query
+    self.mode = mode
+    self.limit = limit
+    self.offset = offset
+    self.candidateLimit = candidateLimit
+  }
+}
+
+struct ArchiveSearchPage: Equatable {
+  let items: [ArchiveItemSnapshot]
+  let nextOffset: Int?
+
+  var hasMore: Bool { nextOffset != nil }
 }
 
 struct ArchiveSnapshot: Equatable {
@@ -114,6 +152,18 @@ struct ArchiveRepresentationSnapshot: Equatable, FetchableRecord {
     value = row["value"]
     size = row["size"]
     payloadHash = row["payload_hash"]
+  }
+}
+
+private struct SearchDocumentRow: FetchableRecord {
+  let itemID: Int64
+  let title: String?
+  let text: String?
+
+  init(row: Row) throws {
+    itemID = row["item_id"]
+    title = row["title"]
+    text = row["text"]
   }
 }
 
@@ -232,6 +282,56 @@ final class ArchiveDatabase {
     }
   }
 
+  func item(id: Int64) throws -> ArchiveItemSnapshot? {
+    try pool.read { db in
+      try Self.fetchArchiveItems(
+        db,
+        sql: Self.archiveItemByIDSQL,
+        arguments: [id]
+      ).first
+    }
+  }
+
+  func search(_ request: ArchiveSearchRequest) throws -> ArchiveSearchPage {
+    let normalizedQuery = request.query.trimmingCharacters(in: .whitespacesAndNewlines)
+    let limit = max(request.limit, 0)
+    let offset = max(request.offset, 0)
+    guard !normalizedQuery.isEmpty, limit > 0 else {
+      return ArchiveSearchPage(items: [], nextOffset: nil)
+    }
+
+    switch request.mode {
+    case .exact:
+      return try searchFTS(query: normalizedQuery, prefix: false, limit: limit, offset: offset)
+    case .prefix:
+      return try searchFTS(query: normalizedQuery, prefix: true, limit: limit, offset: offset)
+    case .fuzzy:
+      return try searchBoundedCandidates(request, limit: limit, offset: offset) {
+        Self.fuzzySearchMatcher(query: $0, item: $1)
+      }
+    case .regexp:
+      return try searchBoundedCandidates(request, limit: limit, offset: offset) {
+        Self.regularExpressionMatcher(query: $0, item: $1)
+      }
+    case .mixed:
+      let exactPage = try searchFTS(query: normalizedQuery, prefix: false, limit: limit, offset: offset)
+      if !exactPage.items.isEmpty { return exactPage }
+
+      let regexpPage = try searchBoundedCandidates(
+        request,
+        limit: limit,
+        offset: offset
+      ) {
+        Self.regularExpressionMatcher(query: $0, item: $1)
+      }
+      if !regexpPage.items.isEmpty { return regexpPage }
+
+      return try searchBoundedCandidates(request, limit: limit, offset: offset) {
+        Self.fuzzySearchMatcher(query: $0, item: $1)
+      }
+    }
+  }
+
   func recentPageQueryPlan(limit: Int = 1) throws -> [String] {
     try pool.read { db in
       let rows = try Row.fetchAll(
@@ -241,6 +341,82 @@ final class ArchiveDatabase {
       )
       return rows.map { $0["detail"] }
     }
+  }
+
+  func rebuildSearchIndex() throws {
+    try pool.write { db in
+      try Self.rebuildSearchIndex(db)
+    }
+  }
+
+  func searchIndexItemIDs(matching query: String, limit: Int = 50) throws -> [Int64] {
+    guard !query.isEmpty, limit > 0 else { return [] }
+
+    return try pool.read { db in
+      try Int64.fetchAll(
+        db,
+        sql: Self.searchIndexItemIDsSQL,
+        arguments: [query, limit]
+      )
+    }
+  }
+
+  func searchIndexDefinition() throws -> String? {
+    try pool.read { db in
+      try Self.searchIndexSQLDefinition(db)
+    }
+  }
+
+  private func searchFTS(query: String, prefix: Bool, limit: Int, offset: Int) throws -> ArchiveSearchPage {
+    guard let matchQuery = Self.ftsQuery(for: query, prefix: prefix) else {
+      return ArchiveSearchPage(items: [], nextOffset: nil)
+    }
+
+    let fetchLimit = limit + 1
+    return try pool.read { db in
+      var items = try Self.fetchArchiveItemSummaries(
+        db,
+        sql: Self.searchItemsSQL,
+        arguments: [matchQuery, fetchLimit, offset]
+      )
+      let hasMore = items.count > limit
+      if hasMore {
+        items.removeLast()
+      }
+
+      return ArchiveSearchPage(
+        items: items,
+        nextOffset: hasMore ? offset + limit : nil
+      )
+    }
+  }
+
+  private func searchBoundedCandidates(
+    _ request: ArchiveSearchRequest,
+    limit: Int,
+    offset: Int,
+    matcher: (String, ArchiveItemSnapshot) -> Bool
+  ) throws -> ArchiveSearchPage {
+    let candidateLimit = max(request.candidateLimit, 0)
+    guard candidateLimit > 0 else {
+      return ArchiveSearchPage(items: [], nextOffset: nil)
+    }
+
+    let candidates = try pool.read { db in
+      try Self.fetchArchiveItemSummaries(
+        db,
+        sql: Self.searchCandidateItemsSQL,
+        arguments: [candidateLimit]
+      )
+    }
+    let matches = candidates.filter { matcher(request.query, $0) }
+    let pageItems = Array(matches.dropFirst(offset).prefix(limit))
+    let hasMore = matches.count > offset + pageItems.count
+
+    return ArchiveSearchPage(
+      items: pageItems,
+      nextOffset: hasMore ? offset + pageItems.count : nil
+    )
   }
 
   func softDeleteItem(id: Int64, at deletedAt: Date = Date()) throws {
@@ -304,6 +480,18 @@ final class ArchiveDatabase {
     }
   }
 
+  func replaceSearchDocument(itemID: Int64, title: String?, text: String?) throws {
+    try pool.write { db in
+      try Self.replaceSearchDocument(itemID: itemID, title: title, text: text, db: db)
+    }
+  }
+
+  func deleteSearchDocument(itemID: Int64) throws {
+    try pool.write { db in
+      try db.execute(sql: "DELETE FROM clipboard_search_documents WHERE item_id = ?", arguments: [itemID])
+    }
+  }
+
   private func fetchRecentPage(after cursor: ArchiveRecentPageCursor?, limit: Int) throws -> ArchiveRecentPage {
     guard limit > 0 else {
       return ArchiveRecentPage(items: [], nextCursor: nil)
@@ -340,9 +528,17 @@ final class ArchiveDatabase {
     sql: String,
     arguments: StatementArguments = []
   ) throws -> [ArchiveItemSnapshot] {
-    var items = try ArchiveItemSnapshot.fetchAll(db, sql: sql, arguments: arguments)
+    var items = try fetchArchiveItemSummaries(db, sql: sql, arguments: arguments)
     try attachRepresentations(to: &items, db: db)
     return items
+  }
+
+  private static func fetchArchiveItemSummaries(
+    _ db: Database,
+    sql: String,
+    arguments: StatementArguments = []
+  ) throws -> [ArchiveItemSnapshot] {
+    try ArchiveItemSnapshot.fetchAll(db, sql: sql, arguments: arguments)
   }
 
   private static func attachRepresentations(to items: inout [ArchiveItemSnapshot], db: Database) throws {
@@ -366,6 +562,105 @@ final class ArchiveDatabase {
       items[index].representations = representationsByItemID[items[index].id] ?? []
     }
   }
+
+  private static func ftsQuery(for query: String, prefix: Bool) -> String? {
+    let tokens = searchTokens(in: query)
+    guard !tokens.isEmpty else { return nil }
+
+    if prefix {
+      return tokens.map { "\($0)*" }.joined(separator: " ")
+    }
+
+    return tokens.map(quotedFTSToken).joined(separator: " ")
+  }
+
+  private static func searchTokens(in query: String) -> [String] {
+    var tokens: [String] = []
+    var current = ""
+
+    for scalar in query.unicodeScalars {
+      if CharacterSet.alphanumerics.contains(scalar) {
+        current.append(String(scalar))
+      } else if !current.isEmpty {
+        tokens.append(current)
+        current = ""
+      }
+    }
+
+    if !current.isEmpty {
+      tokens.append(current)
+    }
+
+    return tokens
+  }
+
+  private static func quotedFTSToken(_ token: String) -> String {
+    "\"\(token.replacingOccurrences(of: "\"", with: "\"\""))\""
+  }
+
+  private static func regularExpressionMatcher(query: String, item: ArchiveItemSnapshot) -> Bool {
+    let searchText = searchableText(for: item)
+    guard let expression = try? NSRegularExpression(pattern: query) else {
+      return false
+    }
+
+    return expression.firstMatch(
+      in: searchText,
+      options: [],
+      range: NSRange(searchText.startIndex..<searchText.endIndex, in: searchText)
+    ) != nil
+  }
+
+  private static func fuzzySearchMatcher(query: String, item: ArchiveItemSnapshot) -> Bool {
+    let queryTokens = searchTokens(in: query).map { $0.lowercased() }
+    guard !queryTokens.isEmpty else { return false }
+
+    var searchText = searchableText(for: item)
+    if searchText.count > fuzzySearchLimit {
+      let stopIndex = searchText.index(searchText.startIndex, offsetBy: fuzzySearchLimit)
+      searchText = "\(searchText[...stopIndex])"
+    }
+    let itemTokens = searchTokens(in: searchText).map { $0.lowercased() }
+
+    return queryTokens.allSatisfy { queryToken in
+      let maximumDistance = max(1, queryToken.count / 4)
+      return itemTokens.contains { itemToken in
+        levenshteinDistance(queryToken, itemToken) <= maximumDistance
+      }
+    }
+  }
+
+  private static func levenshteinDistance(_ lhs: String, _ rhs: String) -> Int {
+    let lhsCharacters = Array(lhs)
+    let rhsCharacters = Array(rhs)
+    guard !lhsCharacters.isEmpty else { return rhsCharacters.count }
+    guard !rhsCharacters.isEmpty else { return lhsCharacters.count }
+
+    var previous = Array(0...rhsCharacters.count)
+    var current = Array(repeating: 0, count: rhsCharacters.count + 1)
+
+    for (lhsIndex, lhsCharacter) in lhsCharacters.enumerated() {
+      current[0] = lhsIndex + 1
+      for (rhsIndex, rhsCharacter) in rhsCharacters.enumerated() {
+        current[rhsIndex + 1] = min(
+          previous[rhsIndex + 1] + 1,
+          current[rhsIndex] + 1,
+          previous[rhsIndex] + (lhsCharacter == rhsCharacter ? 0 : 1)
+        )
+      }
+      swap(&previous, &current)
+    }
+
+    return previous[rhsCharacters.count]
+  }
+
+  private static func searchableText(for item: ArchiveItemSnapshot) -> String {
+    [item.title, item.searchTitle, item.searchText]
+      .compactMap { $0 }
+      .joined(separator: " ")
+  }
+
+  private static let fuzzySearchLimit = 5_000
 
   private static func makeConfiguration() -> Configuration {
     var configuration = Configuration()
@@ -395,6 +690,9 @@ final class ArchiveDatabase {
     migrator.registerMigration("v3_recent_page_indexes", foreignKeyChecks: .immediate) { db in
       try db.execute(sql: Self.recentItemsIndexSQL)
     }
+    migrator.registerMigration("v4_external_content_search_index", foreignKeyChecks: .immediate) { db in
+      try migrateSearchDocumentsToExternalContent(db)
+    }
     return migrator
   }
 
@@ -402,6 +700,29 @@ final class ArchiveDatabase {
     for statement in initialSchemaStatements {
       try db.execute(sql: statement)
     }
+  }
+
+  private static func migrateSearchDocumentsToExternalContent(_ db: Database) throws {
+    let usesExternalContent = try searchIndexUsesExternalContent(db)
+    let legacyRows = usesExternalContent ? [] : try legacySearchDocumentRows(db)
+
+    try db.execute(sql: searchDocumentsTableSQL)
+    for row in legacyRows {
+      try replaceSearchDocument(
+        itemID: row.itemID,
+        title: row.title,
+        text: row.text,
+        db: db
+      )
+    }
+
+    try dropSearchDocumentTriggers(db)
+    if !usesExternalContent, try searchIndexExists(db) {
+      try db.execute(sql: "DROP TABLE clipboard_search_docs")
+    }
+    try db.execute(sql: searchIndexSQL)
+    try createSearchDocumentTriggers(db)
+    try rebuildSearchIndex(db)
   }
 
   private static func insertLegacyItem(
@@ -514,12 +835,19 @@ final class ArchiveDatabase {
   }
 
   private static func insertSearchDocument(for item: HistoryItem, itemID: Int64, db: Database) throws {
+    try replaceSearchDocument(itemID: itemID, title: item.title, text: item.previewableText, db: db)
+  }
+
+  private static func replaceSearchDocument(itemID: Int64, title: String?, text: String?, db: Database) throws {
     try db.execute(
       sql: """
-        INSERT INTO clipboard_search_docs (item_id, title, text)
+        INSERT INTO clipboard_search_documents (item_id, title, text)
         VALUES (?, ?, ?)
+        ON CONFLICT(item_id) DO UPDATE SET
+          title = excluded.title,
+          text = excluded.text
       """,
-      arguments: [itemID, item.title, item.previewableText]
+      arguments: [itemID, title, text]
     )
   }
 
@@ -547,6 +875,55 @@ final class ArchiveDatabase {
     } catch {
       return false
     }
+  }
+
+  private static func searchIndexExists(_ db: Database) throws -> Bool {
+    try (Int.fetchOne(
+      db,
+      sql: "SELECT COUNT(*) FROM sqlite_master WHERE name = 'clipboard_search_docs'"
+    ) ?? 0) > 0
+  }
+
+  private static func searchIndexUsesExternalContent(_ db: Database) throws -> Bool {
+    guard let definition = try searchIndexSQLDefinition(db)?.lowercased() else {
+      return false
+    }
+
+    return definition.contains("content='clipboard_search_documents'") ||
+      definition.contains("content=\"clipboard_search_documents\"") ||
+      definition.contains("content=clipboard_search_documents")
+  }
+
+  private static func searchIndexSQLDefinition(_ db: Database) throws -> String? {
+    try String.fetchOne(
+      db,
+      sql: "SELECT sql FROM sqlite_master WHERE name = 'clipboard_search_docs'"
+    )
+  }
+
+  private static func legacySearchDocumentRows(_ db: Database) throws -> [SearchDocumentRow] {
+    guard try searchIndexExists(db) else { return [] }
+
+    return try SearchDocumentRow.fetchAll(
+      db,
+      sql: "SELECT item_id, title, text FROM clipboard_search_docs WHERE item_id IS NOT NULL"
+    )
+  }
+
+  private static func dropSearchDocumentTriggers(_ db: Database) throws {
+    for trigger in searchDocumentTriggerNames {
+      try db.execute(sql: "DROP TRIGGER IF EXISTS \(trigger)")
+    }
+  }
+
+  private static func createSearchDocumentTriggers(_ db: Database) throws {
+    for statement in searchDocumentTriggerStatements {
+      try db.execute(sql: statement)
+    }
+  }
+
+  private static func rebuildSearchIndex(_ db: Database) throws {
+    try db.execute(sql: "INSERT INTO clipboard_search_docs(clipboard_search_docs) VALUES('rebuild')")
   }
 
   private static func clipboardRepresentationsHavePayloadHash(_ db: Database) throws -> Bool {
@@ -685,17 +1062,22 @@ private extension ArchiveDatabase {
       pins.position AS pin_position,
       pins.key AS pin_key,
       pins.title AS pin_title,
-      clipboard_search_docs.title AS search_title,
-      clipboard_search_docs.text AS search_text
+      clipboard_search_documents.title AS search_title,
+      clipboard_search_documents.text AS search_text
     FROM clipboard_items
     LEFT JOIN source_apps ON source_apps.id = clipboard_items.source_app_id
     LEFT JOIN pins ON pins.item_id = clipboard_items.id
-    LEFT JOIN clipboard_search_docs ON clipboard_search_docs.item_id = clipboard_items.id
+    LEFT JOIN clipboard_search_documents ON clipboard_search_documents.item_id = clipboard_items.id
     """
 
   static let archiveItemsSQL = """
     \(archiveItemSelectSQL)
     ORDER BY clipboard_items.id
+    """
+
+  static let archiveItemByIDSQL = """
+    \(archiveItemSelectSQL)
+    WHERE clipboard_items.id = ?
     """
 
   static let popupArchiveItemSelectSQL = """
@@ -760,6 +1142,93 @@ private extension ArchiveDatabase {
     ORDER BY item_id, id
     """
 
+  static let searchIndexItemIDsSQL = """
+    SELECT clipboard_search_docs.rowid
+    FROM clipboard_search_docs
+    JOIN clipboard_items ON clipboard_items.id = clipboard_search_docs.rowid
+    WHERE clipboard_search_docs MATCH ?
+      AND clipboard_items.deleted_at IS NULL
+    ORDER BY clipboard_search_docs.rowid
+    LIMIT ?
+    """
+
+  static let searchItemsSQL = """
+    \(archiveItemSelectSQL)
+    JOIN clipboard_search_docs ON clipboard_search_docs.rowid = clipboard_items.id
+    WHERE clipboard_search_docs MATCH ?
+      AND clipboard_items.deleted_at IS NULL
+    ORDER BY bm25(clipboard_search_docs), clipboard_items.last_seen_at DESC, clipboard_items.id DESC
+    LIMIT ? OFFSET ?
+    """
+
+  static let searchCandidateItemsSQL = """
+    \(archiveItemSelectSQL)
+    WHERE clipboard_items.deleted_at IS NULL
+    ORDER BY clipboard_items.last_seen_at DESC, clipboard_items.id DESC
+    LIMIT ?
+    """
+
+  static let searchDocumentsTableSQL = """
+    CREATE TABLE IF NOT EXISTS clipboard_search_documents (
+      item_id INTEGER PRIMARY KEY REFERENCES clipboard_items(id) ON DELETE CASCADE,
+      title TEXT,
+      text TEXT
+    )
+    """
+
+  static let searchIndexSQL = """
+    CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_search_docs USING fts5(
+      title,
+      text,
+      content='clipboard_search_documents',
+      content_rowid='item_id',
+      tokenize='unicode61 remove_diacritics 1',
+      prefix='2 3 4'
+    )
+    """
+
+  static let searchDocumentAfterInsertTriggerName = "clipboard_search_documents_ai"
+  static let searchDocumentAfterDeleteTriggerName = "clipboard_search_documents_ad"
+  static let searchDocumentAfterUpdateTriggerName = "clipboard_search_documents_au"
+
+  static let searchDocumentTriggerNames = [
+    searchDocumentAfterInsertTriggerName,
+    searchDocumentAfterDeleteTriggerName,
+    searchDocumentAfterUpdateTriggerName,
+  ]
+
+  static let searchDocumentAfterInsertTriggerSQL = """
+    CREATE TRIGGER IF NOT EXISTS clipboard_search_documents_ai
+    AFTER INSERT ON clipboard_search_documents BEGIN
+      INSERT INTO clipboard_search_docs(rowid, title, text)
+      VALUES (new.item_id, new.title, new.text);
+    END
+    """
+
+  static let searchDocumentAfterDeleteTriggerSQL = """
+    CREATE TRIGGER IF NOT EXISTS clipboard_search_documents_ad
+    AFTER DELETE ON clipboard_search_documents BEGIN
+      INSERT INTO clipboard_search_docs(clipboard_search_docs, rowid, title, text)
+      VALUES ('delete', old.item_id, old.title, old.text);
+    END
+    """
+
+  static let searchDocumentAfterUpdateTriggerSQL = """
+    CREATE TRIGGER IF NOT EXISTS clipboard_search_documents_au
+    AFTER UPDATE ON clipboard_search_documents BEGIN
+      INSERT INTO clipboard_search_docs(clipboard_search_docs, rowid, title, text)
+      VALUES ('delete', old.item_id, old.title, old.text);
+      INSERT INTO clipboard_search_docs(rowid, title, text)
+      VALUES (new.item_id, new.title, new.text);
+    END
+    """
+
+  static let searchDocumentTriggerStatements = [
+    searchDocumentAfterInsertTriggerSQL,
+    searchDocumentAfterDeleteTriggerSQL,
+    searchDocumentAfterUpdateTriggerSQL,
+  ]
+
   static let initialSchemaStatements = [
     """
     CREATE TABLE source_apps (
@@ -799,14 +1268,11 @@ private extension ArchiveDatabase {
     )
     """,
     "CREATE INDEX clipboard_representations_item_id_index ON clipboard_representations(item_id)",
-    """
-    CREATE VIRTUAL TABLE clipboard_search_docs USING fts5(
-      item_id UNINDEXED,
-      title,
-      text,
-      tokenize = 'unicode61'
-    )
-    """,
+    searchDocumentsTableSQL,
+    searchIndexSQL,
+    searchDocumentAfterInsertTriggerSQL,
+    searchDocumentAfterDeleteTriggerSQL,
+    searchDocumentAfterUpdateTriggerSQL,
     """
     CREATE TABLE pins (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

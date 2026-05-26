@@ -44,6 +44,7 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertTrue(health.schemaTables.contains("source_apps"))
     XCTAssertTrue(health.schemaTables.contains("clipboard_items"))
     XCTAssertTrue(health.schemaTables.contains("clipboard_representations"))
+    XCTAssertTrue(health.schemaTables.contains("clipboard_search_documents"))
     XCTAssertTrue(health.schemaTables.contains("clipboard_search_docs"))
     XCTAssertTrue(health.schemaTables.contains("pins"))
     XCTAssertTrue(health.schemaTables.contains("tombstones"))
@@ -56,6 +57,132 @@ final class ArchiveDatabaseTests: XCTestCase {
     let health = try database.healthCheck()
 
     XCTAssertTrue(health.fts5Available)
+  }
+
+  func testSearchIndexUsesExternalContentUnicodeAndPrefixOptions() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let health = try database.healthCheck()
+    let definition = try XCTUnwrap(database.searchIndexDefinition())
+
+    XCTAssertTrue(health.schemaTables.contains("clipboard_search_documents"))
+    XCTAssertTrue(definition.contains("content='clipboard_search_documents'"), definition)
+    XCTAssertTrue(definition.contains("content_rowid='item_id'"), definition)
+    XCTAssertTrue(definition.contains("unicode61 remove_diacritics 1"), definition)
+    XCTAssertTrue(definition.contains("prefix='2 3 4'"), definition)
+  }
+
+  @MainActor
+  func testSearchIndexMatchesInsertedDocumentsWithPrefixAndDiacriticFolding() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Café Archive", text: "résumé searchable", lastCopiedAt: 100),
+      historyItem(title: "Other", text: "unrelated", lastCopiedAt: 200),
+    ])
+    let itemID = try itemID(titled: "Café Archive", in: database.archiveSnapshot())
+
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "cafe"), [itemID])
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "arch*"), [itemID])
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "resume"), [itemID])
+  }
+
+  @MainActor
+  func testSearchIndexUpdateDeleteAndRebuildStayInSync() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Original", text: "oldtoken", lastCopiedAt: 100),
+    ])
+    let itemID = try itemID(titled: "Original", in: database.archiveSnapshot())
+
+    try database.replaceSearchDocument(itemID: itemID, title: "Updated", text: "newtoken")
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "oldtoken"), [])
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "newtoken"), [itemID])
+
+    try database.deleteSearchDocument(itemID: itemID)
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "newtoken"), [])
+
+    try database.replaceSearchDocument(itemID: itemID, title: "Rebuilt", text: "rebuiltneedle")
+    try database.rebuildSearchIndex()
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "rebuiltneedle"), [itemID])
+  }
+
+  @MainActor
+  func testArchiveSearchExactAndPrefixReturnBoundedPages() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Alpha Archive", text: "common token", lastCopiedAt: 100),
+      historyItem(title: "Beta Archive", text: "common token", lastCopiedAt: 200),
+      historyItem(title: "Gamma Archive", text: "common token", lastCopiedAt: 300),
+      historyItem(title: "Deleted Archive", text: "common token", lastCopiedAt: 400),
+      historyItem(title: "Alphabet Soup", text: "prefix token", lastCopiedAt: 500),
+    ])
+    let deletedID = try itemID(titled: "Deleted Archive", in: database.archiveSnapshot())
+    try database.softDeleteItem(id: deletedID)
+
+    let firstPage = try database.search(ArchiveSearchRequest(query: "archive", mode: .exact, limit: 2))
+    let nextOffset = try XCTUnwrap(firstPage.nextOffset)
+    let secondPage = try database.search(ArchiveSearchRequest(
+      query: "archive",
+      mode: .exact,
+      limit: 2,
+      offset: nextOffset
+    ))
+    let exactPrefixPage = try database.search(ArchiveSearchRequest(query: "alph", mode: .exact, limit: 10))
+    let prefixPage = try database.search(ArchiveSearchRequest(query: "alph", mode: .prefix, limit: 10))
+
+    XCTAssertEqual(itemTitles(firstPage.items), ["Gamma Archive", "Beta Archive"])
+    XCTAssertTrue(firstPage.hasMore)
+    XCTAssertEqual(itemTitles(secondPage.items), ["Alpha Archive"])
+    XCTAssertFalse(secondPage.hasMore)
+    XCTAssertEqual(exactPrefixPage.items, [])
+    XCTAssertEqual(itemTitles(prefixPage.items), ["Alphabet Soup", "Alpha Archive"])
+    XCTAssertTrue(firstPage.items.allSatisfy { $0.representations.isEmpty })
+  }
+
+  @MainActor
+  func testArchiveSearchFuzzyAndRegexPostFilterBoundedCandidates() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Regex Match Target", text: "older", lastCopiedAt: 100),
+      historyItem(title: "Archive Cancellation", text: "middle", lastCopiedAt: 200),
+      historyItem(title: "Recent Noise", text: "newer", lastCopiedAt: 300),
+    ])
+
+    let fuzzyPage = try database.search(ArchiveSearchRequest(
+      query: "Arcive",
+      mode: .fuzzy,
+      limit: 10,
+      candidateLimit: 2
+    ))
+    let boundedFuzzyPage = try database.search(ArchiveSearchRequest(
+      query: "Arcive",
+      mode: .fuzzy,
+      limit: 10,
+      candidateLimit: 1
+    ))
+    let regexPage = try database.search(ArchiveSearchRequest(
+      query: "Regex.*Target",
+      mode: .regexp,
+      limit: 10,
+      candidateLimit: 3
+    ))
+    let boundedRegexPage = try database.search(ArchiveSearchRequest(
+      query: "Regex.*Target",
+      mode: .regexp,
+      limit: 10,
+      candidateLimit: 2
+    ))
+    let invalidRegexPage = try database.search(ArchiveSearchRequest(
+      query: "[",
+      mode: .regexp,
+      limit: 10,
+      candidateLimit: 3
+    ))
+
+    XCTAssertEqual(itemTitles(fuzzyPage.items), ["Archive Cancellation"])
+    XCTAssertEqual(boundedFuzzyPage.items, [])
+    XCTAssertEqual(itemTitles(regexPage.items), ["Regex Match Target"])
+    XCTAssertEqual(boundedRegexPage.items, [])
+    XCTAssertEqual(invalidRegexPage.items, [])
   }
 
   @MainActor
