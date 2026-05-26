@@ -139,12 +139,19 @@ struct ArchiveItemSnapshot: Equatable, FetchableRecord {
   }
 }
 
+enum ArchivePayloadStorageKind: String, Equatable {
+  case inline
+  case external
+}
+
 struct ArchiveRepresentationSnapshot: Equatable, FetchableRecord {
   let itemID: Int64
   let type: String
   let value: Data
   let size: Int
   let payloadHash: String?
+  let storageKind: ArchivePayloadStorageKind
+  let relativePath: String?
 
   init(row: Row) throws {
     itemID = row["item_id"]
@@ -152,6 +159,69 @@ struct ArchiveRepresentationSnapshot: Equatable, FetchableRecord {
     value = row["value"]
     size = row["size"]
     payloadHash = row["payload_hash"]
+    storageKind = ArchivePayloadStorageKind(rawValue: row["storage_kind"] ?? "") ?? .inline
+    relativePath = row["relative_path"]
+  }
+}
+
+struct ArchiveExternalPayload: Equatable {
+  let hash: String
+  let byteCount: Int
+  let relativePath: String
+}
+
+struct ArchivePayloadStore {
+  static let defaultRootDirectory = URL.applicationSupportDirectory.appending(path: "Maccy/Payloads")
+
+  let rootDirectory: URL
+
+  init(rootDirectory: URL = Self.defaultRootDirectory) {
+    self.rootDirectory = rootDirectory
+  }
+
+  func write(_ data: Data) throws -> ArchiveExternalPayload {
+    let hash = Self.payloadHash(for: data)
+    let relativePath = Self.relativePath(forHash: hash)
+    let fileURL = fileURL(forRelativePath: relativePath)
+
+    if !FileManager.default.fileExists(atPath: fileURL.path) {
+      try writeAtomically(data, to: fileURL)
+    }
+
+    return ArchiveExternalPayload(hash: hash, byteCount: data.count, relativePath: relativePath)
+  }
+
+  func read(relativePath: String) throws -> Data {
+    try Data(contentsOf: fileURL(forRelativePath: relativePath))
+  }
+
+  func fileURL(forRelativePath relativePath: String) -> URL {
+    rootDirectory.appending(path: relativePath)
+  }
+
+  static func relativePath(forHash hash: String) -> String {
+    "\(hash.prefix(2))/\(hash)"
+  }
+
+  static func payloadHash(for data: Data) -> String {
+    Data(SHA256.hash(data: data)).map { String(format: "%02x", $0) }.joined()
+  }
+
+  private func writeAtomically(_ data: Data, to fileURL: URL) throws {
+    try FileManager.default.createDirectory(
+      at: fileURL.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    let temporaryURL = fileURL.deletingLastPathComponent().appending(path: ".\(UUID().uuidString).tmp")
+    try data.write(to: temporaryURL, options: .atomic)
+    do {
+      try FileManager.default.moveItem(at: temporaryURL, to: fileURL)
+    } catch let error as CocoaError where error.code == .fileWriteFileExists {
+      try? FileManager.default.removeItem(at: temporaryURL)
+    } catch {
+      try? FileManager.default.removeItem(at: temporaryURL)
+      throw error
+    }
   }
 }
 
@@ -367,6 +437,12 @@ final class ArchiveDatabase {
     }
   }
 
+  func representationColumnNames() throws -> [String] {
+    try pool.read { db in
+      try String.fetchAll(db, sql: "SELECT name FROM pragma_table_info('clipboard_representations')")
+    }
+  }
+
   private func searchFTS(query: String, prefix: Bool, limit: Int, offset: Int) throws -> ArchiveSearchPage {
     guard let matchQuery = Self.ftsQuery(for: query, prefix: prefix) else {
       return ArchiveSearchPage(items: [], nextOffset: nil)
@@ -549,7 +625,7 @@ final class ArchiveDatabase {
     let representations = try ArchiveRepresentationSnapshot.fetchAll(
       db,
       sql: """
-        SELECT item_id, type, value, size, payload_hash
+        SELECT item_id, type, value, size, payload_hash, storage_kind, relative_path
         FROM clipboard_representations
         WHERE item_id IN (\(placeholders))
         ORDER BY item_id, id
@@ -693,6 +769,14 @@ final class ArchiveDatabase {
     migrator.registerMigration("v4_external_content_search_index", foreignKeyChecks: .immediate) { db in
       try migrateSearchDocumentsToExternalContent(db)
     }
+    migrator.registerMigration("v5_hybrid_payload_metadata", foreignKeyChecks: .immediate) { db in
+      if try !clipboardRepresentationsHaveStorageKind(db) {
+        try db.execute(sql: "ALTER TABLE clipboard_representations ADD COLUMN storage_kind TEXT NOT NULL DEFAULT 'inline'")
+      }
+      if try !clipboardRepresentationsHaveRelativePath(db) {
+        try db.execute(sql: "ALTER TABLE clipboard_representations ADD COLUMN relative_path TEXT")
+      }
+    }
     return migrator
   }
 
@@ -827,10 +911,26 @@ final class ArchiveDatabase {
   ) throws {
     try db.execute(
       sql: """
-        INSERT INTO clipboard_representations (item_id, type, value, size, payload_hash)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO clipboard_representations (
+          item_id,
+          type,
+          value,
+          size,
+          payload_hash,
+          storage_kind,
+          relative_path
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       """,
-      arguments: [itemID, content.type, value, value.count, payloadHash(for: value)]
+      arguments: [
+        itemID,
+        content.type,
+        value,
+        value.count,
+        payloadHash(for: value),
+        ArchivePayloadStorageKind.inline.rawValue,
+        nil,
+      ]
     )
   }
 
@@ -927,8 +1027,20 @@ final class ArchiveDatabase {
   }
 
   private static func clipboardRepresentationsHavePayloadHash(_ db: Database) throws -> Bool {
+    try clipboardRepresentationsHaveColumn("payload_hash", db)
+  }
+
+  private static func clipboardRepresentationsHaveStorageKind(_ db: Database) throws -> Bool {
+    try clipboardRepresentationsHaveColumn("storage_kind", db)
+  }
+
+  private static func clipboardRepresentationsHaveRelativePath(_ db: Database) throws -> Bool {
+    try clipboardRepresentationsHaveColumn("relative_path", db)
+  }
+
+  private static func clipboardRepresentationsHaveColumn(_ name: String, _ db: Database) throws -> Bool {
     try String.fetchAll(db, sql: "SELECT name FROM pragma_table_info('clipboard_representations')")
-      .contains("payload_hash")
+      .contains(name)
   }
 
   private static func pinsHaveKey(_ db: Database) throws -> Bool {
@@ -1137,7 +1249,7 @@ private extension ArchiveDatabase {
   }
 
   static let archiveRepresentationsSQL = """
-    SELECT item_id, type, value, size, payload_hash
+    SELECT item_id, type, value, size, payload_hash, storage_kind, relative_path
     FROM clipboard_representations
     ORDER BY item_id, id
     """

@@ -52,6 +52,30 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertFalse(health.schemaTables.contains { $0.hasPrefix("Z") })
   }
 
+  func testRepresentationSchemaIncludesHybridPayloadMetadata() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let columns = try database.representationColumnNames()
+
+    XCTAssertTrue(columns.contains("payload_hash"))
+    XCTAssertTrue(columns.contains("storage_kind"))
+    XCTAssertTrue(columns.contains("relative_path"))
+  }
+
+  func testPayloadStoreWritesContentAddressedFilesByHash() throws {
+    let store = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let data = Data("external payload seam".utf8)
+
+    let firstPayload = try store.write(data)
+    let secondPayload = try store.write(data)
+    let fileURL = store.fileURL(forRelativePath: firstPayload.relativePath)
+
+    XCTAssertEqual(firstPayload, secondPayload)
+    XCTAssertEqual(firstPayload.byteCount, data.count)
+    XCTAssertEqual(firstPayload.relativePath, "\(firstPayload.hash.prefix(2))/\(firstPayload.hash)")
+    XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+    XCTAssertEqual(try store.read(relativePath: firstPayload.relativePath), data)
+  }
+
   func testFTS5CapabilitySmokeTest() throws {
     let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
     let health = try database.healthCheck()
@@ -232,6 +256,8 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertEqual(representation.value, "hello archive".data(using: .utf8))
     XCTAssertEqual(representation.size, 13)
     XCTAssertNotNil(representation.payloadHash)
+    XCTAssertEqual(representation.storageKind, .inline)
+    XCTAssertNil(representation.relativePath)
   }
 
   @MainActor
