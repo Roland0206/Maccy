@@ -29,7 +29,32 @@ struct HistoryItemView: View {
     }
   }
 
+  @Default(.autoOpenPreview) private var autoOpenPreview
   @Environment(AppState.self) private var appState
+
+  private var inlinePinVisible: Bool {
+    return item.isSelected && !autoOpenPreview
+  }
+
+  private var inlinePinAction: AnyView? {
+    guard inlinePinVisible else { return nil }
+
+    return AnyView(
+      ToolbarButton {
+        withAnimation {
+          appState.history.togglePin(item)
+        }
+      } label: {
+        Image(systemName: item.isPinned ? "pin.slash" : "pin")
+      }
+      .shortcutKeyHelp(
+        name: .pin,
+        key: item.isPinned ? "UnpinKey" : "PinKey",
+        tableName: "PreviewItemView",
+        replacementKey: "pinKey"
+      )
+    )
+  }
 
   var body: some View {
     ListItemView(
@@ -42,7 +67,8 @@ struct HistoryItemView: View {
       shortcuts: item.shortcuts,
       isSelected: item.isSelected,
       selectionIndex: visualIndex,
-      selectionAppearance: selectionAppearance
+      selectionAppearance: selectionAppearance,
+      trailingAction: inlinePinAction
     ) {
       Text(verbatim: item.title)
     }
