@@ -25,6 +25,7 @@ Maccy works on macOS Sonoma 14 or higher.
   * [When assigning a hotkey to open Maccy, it says that this hotkey is already used in some system setting.](#when-assigning-a-hotkey-to-open-maccy-it-says-that-this-hotkey-is-already-used-in-some-system-setting)
   * [How to restore hidden footer?](#how-to-restore-hidden-footer)
   * [How to ignore copies from Universal Clipboard?](#how-to-ignore-copies-from-universal-clipboard)
+  * [What are archive privacy defaults?](#what-are-archive-privacy-defaults)
   * [My keyboard shortcut stopped working in password fields. How do I fix this?](#my-keyboard-shortcut-stopped-working-in-password-fields-how-do-i-fix-this)
 * [Translations](#translations)
 * [Motivation](#motivation)
@@ -95,6 +96,8 @@ or overwritten:
 * `Pasteboard generator type`
 * `net.antelle.keeweb`
 
+Maccy also ignores copies from common password managers by source app by default. You can review or change this list in Preferences -> Ignore -> Applications.
+
 You can add additional custom types using settings.
 To find what custom types are used by an application, you can use
 free application [Pasteboard-Viewer](https://github.com/sindresorhus/Pasteboard-Viewer).
@@ -142,6 +145,10 @@ defaults write org.p0deje.Maccy showFooter 1
 
 1. Open Preferences -> Ignore -> Pasteboard Types.
 2. Add `com.apple.is-remote-clipboard`.
+
+### What are archive privacy defaults?
+
+See [Archive privacy defaults](docs/archive-privacy.md) for retention defaults, ignored item coverage, OCR opt-in, and secure-delete limits.
 
 ### My keyboard shortcut stopped working in password fields. How do I fix this?
 

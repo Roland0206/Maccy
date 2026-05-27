@@ -58,6 +58,7 @@ struct StorageSettingsPane: View {
 
   @Default(.size) private var size
   @Default(.sortBy) private var sortBy
+  @Default(.recognizeTextInImages) private var recognizeTextInImages
   @Default(.archivePlainTextRetention) private var plainTextRetention
   @Default(.archiveRichTextAndWebContentRetention) private var richTextAndWebContentRetention
   @Default(.archiveImageRetention) private var imageRetention
@@ -103,6 +104,11 @@ struct StorageSettingsPane: View {
         Text("SaveDescription", tableName: "StorageSettings")
           .controlSize(.small)
           .foregroundStyle(.gray)
+        Toggle(
+          isOn: $recognizeTextInImages,
+          label: { Text("RecognizeTextInImages", tableName: "StorageSettings") }
+        )
+        .help(Text("RecognizeTextInImagesTooltip", tableName: "StorageSettings"))
       }
 
       Settings.Section(label: { Text("Size", tableName: "StorageSettings") }) {

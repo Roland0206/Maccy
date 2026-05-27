@@ -87,8 +87,10 @@ class HistoryItem {
 
   func generateTitle() -> String {
     guard image == nil else {
-      Task {
-        self.performTextRecognition()
+      if Defaults[.recognizeTextInImages] {
+        Task {
+          self.performTextRecognition()
+        }
       }
       return ""
     }

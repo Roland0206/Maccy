@@ -4,6 +4,8 @@
 "Images" = "Images";
 "Text" = "Text";
 "SaveDescription" = "Change what types of copied content should be stored.";
+"RecognizeTextInImages" = "Recognize text in images";
+"RecognizeTextInImagesTooltip" = "Off by default for privacy. When enabled, Maccy uses on-device OCR to make saved images searchable.";
 "Size" = "Size:";
 "SizeTooltip" = "Number of history items to keep.\nDefault: 200.";
 "CurrentSizeTooltip" = "Current size on disk.";
@@ -13,7 +15,7 @@
 "NumberOfCopies" = "Number of copies";
 "SortByTooltip" = "Default: Time of last copy.";
 "Retention" = "Retention:";
-"RetentionDescription" = "Choose how long archived clipboard content stays on disk. Pinned items are exempt from automatic retention.";
+"RetentionDescription" = "Choose how long archived clipboard content stays on disk. Defaults keep plain text forever, rich text/files for 30 days, images/unknown formats for 7 days. Pinned items are exempt from automatic retention.";
 "ArchiveMaximumItemCount" = "Archive max items:";
 "ArchiveMaximumItemCountTooltip" = "Maximum unpinned archived items to keep. Set to 0 for unlimited.";
 "PrivacyFriendlyPreset" = "Apply privacy-friendly preset";

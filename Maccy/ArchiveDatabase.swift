@@ -1444,14 +1444,24 @@ final class ArchiveDatabase {
     inlinePayloadThresholdBytes: Int,
     db: Database
   ) throws {
-    let sourceAppID = try upsertSourceApp(item.application, db: db)
-    let itemID = try insertClipboardItem(item, sourceAppID: sourceAppID, db: db)
+    guard shouldImportLegacyItem(item) else { return }
 
-    for (contentIndex, content) in item.contents.enumerated() {
-      guard let value = content.value else {
+    let archiveContents = archiveableContents(from: item.contents)
+    guard !archiveContents.isEmpty else { return }
+
+    let sourceAppID = try upsertSourceApp(item.application, db: db)
+    let itemID = try insertClipboardItem(
+      item,
+      contents: archiveContents.map { $0.content },
+      sourceAppID: sourceAppID,
+      db: db
+    )
+
+    for archivedContent in archiveContents {
+      guard let value = archivedContent.content.value else {
         report.errors.append(ArchiveImportError(
           itemIndex: itemIndex,
-          contentIndex: contentIndex,
+          contentIndex: archivedContent.originalIndex,
           reason: "HistoryItemContent value is nil"
         ))
         continue
@@ -1459,7 +1469,7 @@ final class ArchiveDatabase {
 
       do {
         try insertRepresentation(
-          content,
+          archivedContent.content,
           value: value,
           itemID: itemID,
           payloadStore: payloadStore,
@@ -1470,13 +1480,13 @@ final class ArchiveDatabase {
       } catch {
         report.errors.append(ArchiveImportError(
           itemIndex: itemIndex,
-          contentIndex: contentIndex,
+          contentIndex: archivedContent.originalIndex,
           reason: error.localizedDescription
         ))
       }
     }
 
-    try insertSearchDocument(for: item, itemID: itemID, db: db)
+    try insertSearchDocument(title: item.title, contents: archiveContents.map { $0.content }, itemID: itemID, db: db)
     report.searchDocumentsImported += 1
 
     if let pin = item.pin, !pin.isEmpty {
@@ -1486,6 +1496,71 @@ final class ArchiveDatabase {
     }
 
     report.itemsImported += 1
+  }
+
+  private static func shouldImportLegacyItem(_ item: HistoryItem) -> Bool {
+    if shouldIgnoreSourceApp(item.application) {
+      return false
+    }
+
+    let pasteboardTypes = Set(item.contents.map { NSPasteboard.PasteboardType($0.type) })
+    return !shouldIgnorePasteboardTypes(pasteboardTypes) && !shouldIgnoreRegexp(in: item.contents)
+  }
+
+  private static func shouldIgnorePasteboardTypes(_ types: Set<NSPasteboard.PasteboardType>) -> Bool {
+    let ignoredTypes = NSPasteboard.PasteboardType.privacyMarkerTypes
+      .union(Defaults[.ignoredPasteboardTypes].map { NSPasteboard.PasteboardType($0) })
+
+    return types.isDisjoint(with: Defaults[.enabledPasteboardTypes]) ||
+      !types.isDisjoint(with: ignoredTypes)
+  }
+
+  private static func shouldIgnoreSourceApp(_ bundleIdentifier: String?) -> Bool {
+    guard let bundleIdentifier else { return false }
+
+    if Defaults[.ignoreAllAppsExceptListed] {
+      return !Defaults[.ignoredApps].contains(bundleIdentifier)
+    } else {
+      return Defaults[.ignoredApps].contains(bundleIdentifier)
+    }
+  }
+
+  private static func shouldIgnoreRegexp(in contents: [HistoryItemContent]) -> Bool {
+    for regexp in Defaults[.ignoreRegexp] {
+      for content in contents where NSPasteboard.PasteboardType(content.type) == .string {
+        guard let value = content.value,
+              let string = String(data: value, encoding: .utf8) else {
+          continue
+        }
+
+        do {
+          let regex = try NSRegularExpression(pattern: regexp)
+          if regex.numberOfMatches(in: string, range: NSRange(string.startIndex..., in: string)) > 0 {
+            return true
+          }
+        } catch {
+          return false
+        }
+      }
+    }
+
+    return false
+  }
+
+  private static func archiveableContents(
+    from contents: [HistoryItemContent]
+  ) -> [(originalIndex: Int, content: HistoryItemContent)] {
+    let enabledTypes = Defaults[.enabledPasteboardTypes]
+    return contents.enumerated().compactMap { index, content in
+      let type = NSPasteboard.PasteboardType(content.type)
+      guard enabledTypes.contains(type),
+            !content.type.starts(with: dynamicTypePrefix),
+            !content.type.starts(with: microsoftSourcePrefix) else {
+        return nil
+      }
+
+      return (originalIndex: index, content: content)
+    }
   }
 
   private static func upsertSourceApp(_ bundleIdentifier: String?, db: Database) throws -> Int64? {
@@ -1512,7 +1587,12 @@ final class ArchiveDatabase {
     )
   }
 
-  private static func insertClipboardItem(_ item: HistoryItem, sourceAppID: Int64?, db: Database) throws -> Int64 {
+  private static func insertClipboardItem(
+    _ item: HistoryItem,
+    contents: [HistoryItemContent],
+    sourceAppID: Int64?,
+    db: Database
+  ) throws -> Int64 {
     try db.execute(
       sql: """
         INSERT INTO clipboard_items (
@@ -1527,7 +1607,7 @@ final class ArchiveDatabase {
       """,
       arguments: [
         sourceAppID,
-        itemHash(for: item.contents),
+        itemHash(for: contents),
         item.title,
         archiveTimestamp(item.firstCopiedAt),
         archiveTimestamp(item.lastCopiedAt),
@@ -1590,8 +1670,67 @@ final class ArchiveDatabase {
     )
   }
 
-  private static func insertSearchDocument(for item: HistoryItem, itemID: Int64, db: Database) throws {
-    try replaceSearchDocument(itemID: itemID, title: item.title, text: item.previewableText, db: db)
+  private static func insertSearchDocument(
+    title: String,
+    contents: [HistoryItemContent],
+    itemID: Int64,
+    db: Database
+  ) throws {
+    try replaceSearchDocument(itemID: itemID, title: title, text: previewableText(contents, title: title), db: db)
+  }
+
+  private static func previewableText(_ contents: [HistoryItemContent], title: String) -> String {
+    let fileURLText = contents
+      .filter { NSPasteboard.PasteboardType($0.type) == .fileURL }
+      .compactMap { content -> String? in
+        guard let value = content.value else { return nil }
+        return URL(dataRepresentation: value, relativeTo: nil, isAbsolute: true)?.absoluteString.removingPercentEncoding
+      }
+      .joined(separator: "\n")
+
+    if !fileURLText.isEmpty {
+      return fileURLText
+    }
+
+    if let text = stringValue(for: .string, in: contents), !text.isEmpty {
+      return text
+    }
+
+    if let rtf = attributedStringValue(for: .rtf, in: contents), !rtf.string.isEmpty {
+      return rtf.string
+    }
+
+    if let html = attributedStringValue(for: .html, in: contents), !html.string.isEmpty {
+      return html.string
+    }
+
+    return title
+  }
+
+  private static func stringValue(for type: NSPasteboard.PasteboardType, in contents: [HistoryItemContent]) -> String? {
+    guard let value = contents.first(where: { NSPasteboard.PasteboardType($0.type) == type })?.value else {
+      return nil
+    }
+
+    return String(data: value, encoding: .utf8)
+  }
+
+  private static func attributedStringValue(
+    for type: NSPasteboard.PasteboardType,
+    in contents: [HistoryItemContent]
+  ) -> NSAttributedString? {
+    guard let value = contents.first(where: { NSPasteboard.PasteboardType($0.type) == type })?.value else {
+      return nil
+    }
+
+    switch type {
+    case .rtf:
+      return NSAttributedString(rtf: value, documentAttributes: nil)
+    case .html:
+      return NSAttributedString(html: value, documentAttributes: nil)
+    default:
+      return nil
+    }
   }
 
   private static func replaceSearchDocument(itemID: Int64, title: String?, text: String?, db: Database) throws {
@@ -2073,6 +2212,8 @@ private extension ArchiveDatabase {
   static let userDeletedTombstoneReason = "user_deleted"
   static let retentionExpiredTombstoneReason = "retention_expired"
   static let countLimitTombstoneReason = "retention_count_limit"
+  static let dynamicTypePrefix = "dyn."
+  static let microsoftSourcePrefix = "com.microsoft.ole.source."
 
   static func retentionRepresentationCandidatesSQL(typePredicate: String) -> String {
     """
