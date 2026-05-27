@@ -762,12 +762,16 @@ private struct RetentionRepresentationRow: FetchableRecord {
 }
 
 enum ArchiveDatabaseFeature {
-  static let launchArgument = "--enable-archive-database"
-  static let environmentVariable = "MACCY_ARCHIVE_DATABASE_ENABLED"
+  static let disableLaunchArgument = "--disable-archive-database"
+  static let disableEnvironmentVariable = "MACCY_ARCHIVE_DATABASE_DISABLED"
 
   static var isEnabled: Bool {
-    CommandLine.arguments.contains(launchArgument) ||
-      ProcessInfo.processInfo.environment[environmentVariable] == "1"
+    isEnabled(arguments: CommandLine.arguments, environment: ProcessInfo.processInfo.environment)
+  }
+
+  static func isEnabled(arguments: [String], environment: [String: String]) -> Bool {
+    !arguments.contains(disableLaunchArgument) &&
+      environment[disableEnvironmentVariable] != "1"
   }
 }
 
