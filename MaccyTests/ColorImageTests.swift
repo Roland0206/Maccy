@@ -20,30 +20,58 @@ class SidebarPositionTests: XCTestCase {
   let visibleFrame = NSRect(x: 10, y: 20, width: 1000, height: 800)
   let contentSize = NSSize(width: 300, height: 200)
 
-  func testLeftSidebarFrameUsesVisibleHeight() {
+  func testLeftSidebarFrameFitsContent() {
     XCTAssertEqual(
-      SidebarPosition.left.frame(contentSize: contentSize, visibleFrame: visibleFrame),
+      SidebarPosition.left.frame(contentSize: contentSize, visibleFrame: visibleFrame, size: .fitContent),
+      NSRect(x: 10, y: 20, width: 300, height: 200)
+    )
+  }
+
+  func testRightSidebarFrameFitsContent() {
+    XCTAssertEqual(
+      SidebarPosition.right.frame(contentSize: contentSize, visibleFrame: visibleFrame, size: .fitContent),
+      NSRect(x: 710, y: 20, width: 300, height: 200)
+    )
+  }
+
+  func testTopSidebarFrameFitsContent() {
+    XCTAssertEqual(
+      SidebarPosition.top.frame(contentSize: contentSize, visibleFrame: visibleFrame, size: .fitContent),
+      NSRect(x: 10, y: 620, width: 300, height: 200)
+    )
+  }
+
+  func testBottomSidebarFrameFitsContent() {
+    XCTAssertEqual(
+      SidebarPosition.bottom.frame(contentSize: contentSize, visibleFrame: visibleFrame, size: .fitContent),
+      NSRect(x: 10, y: 20, width: 300, height: 200)
+    )
+  }
+
+  func testLeftSidebarFrameFillsVisibleHeight() {
+    XCTAssertEqual(
+      SidebarPosition.left.frame(contentSize: contentSize, visibleFrame: visibleFrame, size: .fillAvailableSpace),
       NSRect(x: 10, y: 20, width: 300, height: 800)
     )
   }
 
-  func testRightSidebarFrameUsesVisibleHeight() {
+  func testRightSidebarFrameFillsVisibleHeight() {
     XCTAssertEqual(
-      SidebarPosition.right.frame(contentSize: contentSize, visibleFrame: visibleFrame),
+      SidebarPosition.right.frame(contentSize: contentSize, visibleFrame: visibleFrame, size: .fillAvailableSpace),
       NSRect(x: 710, y: 20, width: 300, height: 800)
     )
   }
 
-  func testTopSidebarFrameUsesVisibleWidth() {
+  func testTopSidebarFrameFillsVisibleWidth() {
     XCTAssertEqual(
-      SidebarPosition.top.frame(contentSize: contentSize, visibleFrame: visibleFrame),
+      SidebarPosition.top.frame(contentSize: contentSize, visibleFrame: visibleFrame, size: .fillAvailableSpace),
       NSRect(x: 10, y: 620, width: 1000, height: 200)
     )
   }
 
-  func testBottomSidebarFrameUsesVisibleWidth() {
+  func testBottomSidebarFrameFillsVisibleWidth() {
     XCTAssertEqual(
-      SidebarPosition.bottom.frame(contentSize: contentSize, visibleFrame: visibleFrame),
+      SidebarPosition.bottom.frame(contentSize: contentSize, visibleFrame: visibleFrame, size: .fillAvailableSpace),
       NSRect(x: 10, y: 20, width: 1000, height: 200)
     )
   }

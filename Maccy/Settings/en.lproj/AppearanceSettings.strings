@@ -9,6 +9,10 @@
 "SidebarPositionTop" = "Top";
 "SidebarPositionBottom" = "Bottom";
 "SidebarPositionTooltip" = "Choose the screen edge for sidebar mode.\nDefault: Left.";
+"SidebarSize" = "Sidebar size:";
+"SidebarSizeFitContent" = "Fit content";
+"SidebarSizeFillAvailableSpace" = "Fill available space";
+"SidebarSizeTooltip" = "Choose whether sidebar mode fits content or fills the available screen edge dimension.\nDefault: Fit content.";
 "PopupAt" = "Popup at:";
 "PopupAtCursor" = "Cursor";
 "PopupAtMenuBarIcon" = "Menu icon";
