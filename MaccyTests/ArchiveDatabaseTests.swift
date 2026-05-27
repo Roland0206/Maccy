@@ -303,6 +303,218 @@ final class ArchiveDatabaseTests: XCTestCase {
     ))
   }
 
+  @MainActor
+  func testRetentionDeletesExpiredRepresentationsButKeepsRetainedText() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let imagePayload = Data("expired image payload".utf8)
+    try database.importLegacyHistoryItems([
+      historyItem(
+        title: "Mixed",
+        contents: [
+          content(.string, Data("kept text".utf8)),
+          content(.png, imagePayload),
+        ],
+        lastCopiedAt: 100
+      ),
+    ])
+    let imagePath = try XCTUnwrap(database.archiveSnapshot().items.first?.representations.first {
+      $0.type == NSPasteboard.PasteboardType.png.rawValue
+    }?.relativePath)
+
+    let report = try database.performRetentionMaintenance(
+      configuration: ArchiveRetentionConfiguration(
+        plainText: .forever,
+        images: .sevenDays,
+        vacuumPageCount: 0
+      ),
+      now: Date(timeIntervalSince1970: 100 + 8 * 24 * 60 * 60),
+      batchLimit: 10
+    )
+    let item = try XCTUnwrap(database.archiveSnapshot().items.first)
+
+    XCTAssertEqual(report.expiredRepresentationsDeleted, 1)
+    XCTAssertEqual(report.expiredItemsSoftDeleted, 0)
+    XCTAssertNil(item.deletedAt)
+    XCTAssertEqual(item.representations.map(\.type), [NSPasteboard.PasteboardType.string.rawValue])
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "kept"), [item.id])
+    XCTAssertFalse(FileManager.default.fileExists(atPath: payloadStore.fileURL(forRelativePath: imagePath).path))
+  }
+
+  @MainActor
+  func testRetentionPurgesExpiredRepresentationSearchDocumentsAndRebuildsIndex() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(
+        title: "Binary Holder",
+        contents: [
+          content(.string, Data("secret token".utf8)),
+          content(.png, Data("retained image".utf8)),
+        ],
+        lastCopiedAt: 100
+      ),
+    ])
+    let itemID = try XCTUnwrap(database.archiveSnapshot().items.first?.id)
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "secret"), [itemID])
+
+    let report = try database.performRetentionMaintenance(
+      configuration: ArchiveRetentionConfiguration(
+        plainText: .sevenDays,
+        images: .forever,
+        vacuumPageCount: 0
+      ),
+      now: Date(timeIntervalSince1970: 100 + 8 * 24 * 60 * 60),
+      batchLimit: 10
+    )
+    let item = try XCTUnwrap(database.archiveSnapshot().items.first)
+
+    XCTAssertEqual(report.expiredRepresentationsDeleted, 1)
+    XCTAssertEqual(report.expiredItemsSoftDeleted, 0)
+    XCTAssertNil(item.deletedAt)
+    XCTAssertEqual(item.representations.map(\.type), [NSPasteboard.PasteboardType.png.rawValue])
+    XCTAssertNil(item.searchTitle)
+    XCTAssertNil(item.searchText)
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "secret"), [])
+  }
+
+  @MainActor
+  func testRetentionSoftDeletesItemsWhenAllRepresentationsExpireAndWritesTombstone() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Expired", text: "expired", lastCopiedAt: 100),
+    ])
+
+    let report = try database.performRetentionMaintenance(
+      configuration: ArchiveRetentionConfiguration(
+        plainText: .sevenDays,
+        tombstones: .forever,
+        vacuumPageCount: 0
+      ),
+      now: Date(timeIntervalSince1970: 100 + 8 * 24 * 60 * 60),
+      batchLimit: 10
+    )
+    let item = try XCTUnwrap(database.archiveSnapshot().items.first)
+    let tombstone = try XCTUnwrap(database.tombstones().first)
+
+    XCTAssertEqual(report.expiredRepresentationsDeleted, 1)
+    XCTAssertEqual(report.expiredItemsSoftDeleted, 1)
+    XCTAssertNotNil(item.deletedAt)
+    XCTAssertEqual(tombstone.entityKind, "clipboard_item")
+    XCTAssertEqual(tombstone.entityID, String(item.id))
+    XCTAssertEqual(tombstone.reason, "retention_expired")
+  }
+
+  @MainActor
+  func testRetentionExemptsPinnedItems() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Pinned", text: "pinned", lastCopiedAt: 100, pin: "p"),
+    ])
+
+    let report = try database.performRetentionMaintenance(
+      configuration: ArchiveRetentionConfiguration(
+        plainText: .sevenDays,
+        vacuumPageCount: 0
+      ),
+      now: Date(timeIntervalSince1970: 100 + 8 * 24 * 60 * 60),
+      batchLimit: 10
+    )
+    let item = try XCTUnwrap(database.archiveSnapshot().items.first)
+
+    XCTAssertEqual(report.expiredRepresentationsDeleted, 0)
+    XCTAssertEqual(report.expiredItemsSoftDeleted, 0)
+    XCTAssertNil(item.deletedAt)
+    XCTAssertEqual(item.representations.count, 1)
+  }
+
+  @MainActor
+  func testRetentionSoftDeletesItemsOverMaximumCount() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Oldest", text: "oldest", lastCopiedAt: 100),
+      historyItem(title: "Pinned Old", text: "pinned", lastCopiedAt: 150, pin: "p"),
+      historyItem(title: "Middle", text: "middle", lastCopiedAt: 200),
+      historyItem(title: "Newest", text: "newest", lastCopiedAt: 300),
+    ])
+
+    let report = try database.performRetentionMaintenance(
+      configuration: ArchiveRetentionConfiguration(
+        maximumItemCount: 2,
+        vacuumPageCount: 0
+      ),
+      now: Date(timeIntervalSince1970: 400),
+      batchLimit: 10
+    )
+    let snapshot = try database.archiveSnapshot()
+
+    XCTAssertEqual(report.countLimitedItemsSoftDeleted, 1)
+    XCTAssertNotNil(snapshot.items.first { $0.title == "Oldest" }?.deletedAt)
+    XCTAssertNil(snapshot.items.first { $0.title == "Middle" }?.deletedAt)
+    XCTAssertNil(snapshot.items.first { $0.title == "Newest" }?.deletedAt)
+    XCTAssertNil(snapshot.items.first { $0.title == "Pinned Old" }?.deletedAt)
+  }
+
+  @MainActor
+  func testRetentionPhysicallyDeletesExpiredTombstonesAndCleansPayloads() throws {
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: tempDirectory.appending(path: "Archive.sqlite"),
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    let payload = Data("deleted external payload".utf8)
+    try database.importLegacyHistoryItems([
+      historyItem(title: "Deleted", contents: [content(.string, payload)]),
+    ])
+    let snapshot = try database.archiveSnapshot()
+    let itemID = try XCTUnwrap(snapshot.items.first?.id)
+    let relativePath = try XCTUnwrap(snapshot.items.first?.representations.first?.relativePath)
+    try database.softDeleteItem(id: itemID, at: Date(timeIntervalSince1970: 100))
+
+    let report = try database.performRetentionMaintenance(
+      configuration: ArchiveRetentionConfiguration(
+        tombstones: .sevenDays,
+        vacuumPageCount: 0
+      ),
+      now: Date(timeIntervalSince1970: 100 + 8 * 24 * 60 * 60),
+      batchLimit: 10
+    )
+
+    XCTAssertEqual(report.tombstonedItemsPhysicallyDeleted, 1)
+    XCTAssertEqual(report.externalPayloadsDeleted, [ArchivePayloadFile(relativePath: relativePath, byteCount: payload.count)])
+    XCTAssertEqual(try database.archiveSnapshot().items, [])
+    XCTAssertEqual(try database.tombstones(), [])
+    XCTAssertFalse(FileManager.default.fileExists(atPath: payloadStore.fileURL(forRelativePath: relativePath).path))
+  }
+
+  func testArchiveMaintenanceSchedulerInstallsRecurringTimer() {
+    let scheduler = ArchiveMaintenanceScheduler()
+
+    XCTAssertFalse(scheduler.isScheduled)
+    scheduler.start(interval: 60) {}
+    XCTAssertTrue(scheduler.isScheduled)
+    scheduler.stop()
+    XCTAssertFalse(scheduler.isScheduled)
+  }
+
+  func testArchiveMaintenanceSchedulerSkipsOverlappingRuns() {
+    let scheduler = ArchiveMaintenanceScheduler()
+    var reentrantWasSkipped = false
+
+    let outerRan = scheduler.runOnceIfIdle {
+      reentrantWasSkipped = !scheduler.runOnceIfIdle {}
+    }
+    let laterRan = scheduler.runOnceIfIdle {}
+
+    XCTAssertTrue(outerRan)
+    XCTAssertTrue(reentrantWasSkipped)
+    XCTAssertTrue(laterRan)
+  }
+
   func testFTS5CapabilitySmokeTest() throws {
     let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
     let health = try database.healthCheck()
@@ -749,10 +961,15 @@ final class ArchiveDatabaseTests: XCTestCase {
   private func historyItem(
     title: String,
     contents: [HistoryItemContent],
+    lastCopiedAt: TimeInterval? = nil,
     pin: String? = nil
   ) -> HistoryItem {
     let item = HistoryItem(contents: contents)
     item.title = title
+    if let lastCopiedAt {
+      item.firstCopiedAt = Date(timeIntervalSince1970: lastCopiedAt - 1)
+      item.lastCopiedAt = Date(timeIntervalSince1970: lastCopiedAt)
+    }
     item.pin = pin
     return item
   }

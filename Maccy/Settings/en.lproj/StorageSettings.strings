@@ -12,3 +12,10 @@
 "FirstCopiedAt" = "Time of first copy";
 "NumberOfCopies" = "Number of copies";
 "SortByTooltip" = "Default: Time of last copy.";
+"Retention" = "Retention:";
+"RetentionDescription" = "Choose how long archived clipboard content stays on disk. Pinned items are exempt from automatic retention.";
+"ArchiveMaximumItemCount" = "Archive max items:";
+"ArchiveMaximumItemCountTooltip" = "Maximum unpinned archived items to keep. Set to 0 for unlimited.";
+"PrivacyFriendlyPreset" = "Apply privacy-friendly preset";
+"TextForeverNonTextSevenDaysPreset" = "Keep text forever, delete non-text after 7 days";
+"RetentionPresetTooltip" = "Presets update retention dropdowns only.";

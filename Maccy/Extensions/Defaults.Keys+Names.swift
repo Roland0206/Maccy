@@ -38,6 +38,33 @@ extension Defaults.Keys {
     "archiveInlinePayloadThresholdBytes",
     default: 128 * 1024
   )
+  static let archivePlainTextRetention = Key<ArchiveRetentionPolicy>(
+    "archivePlainTextRetention",
+    default: .forever
+  )
+  static let archiveRichTextAndWebContentRetention = Key<ArchiveRetentionPolicy>(
+    "archiveRichTextAndWebContentRetention",
+    default: .thirtyDays
+  )
+  static let archiveImageRetention = Key<ArchiveRetentionPolicy>(
+    "archiveImageRetention",
+    default: .sevenDays
+  )
+  static let archiveFileRetention = Key<ArchiveRetentionPolicy>(
+    "archiveFileRetention",
+    default: .thirtyDays
+  )
+  static let archiveOtherUnknownBinaryRetention = Key<ArchiveRetentionPolicy>(
+    "archiveOtherUnknownBinaryRetention",
+    default: .sevenDays
+  )
+  static let archiveTombstoneRetention = Key<ArchiveRetentionPolicy>(
+    "archiveTombstoneRetention",
+    default: .thirtyDays
+  )
+  static let archiveMaximumItemCount = Key<Int>("archiveMaximumItemCount", default: 0)
+  static let archiveMaintenanceBatchLimit = Key<Int>("archiveMaintenanceBatchLimit", default: 200)
+  static let archiveIncrementalVacuumPageCount = Key<Int>("archiveIncrementalVacuumPageCount", default: 16)
   static let lastReviewRequestedAt = Key<Date>("lastReviewRequestedAt", default: Date.now)
   static let menuIcon = Key<MenuIcon>("menuIcon", default: .maccy)
   static let migrations = Key<[String: Bool]>("migrations", default: [:])
