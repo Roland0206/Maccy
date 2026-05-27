@@ -102,8 +102,22 @@ class FloatingPanel<Content: View>: NSPanel, NSWindowDelegate {
       return nil
     }
 
+    let preview = AppState.shared.preview
     let size = Defaults[.windowSize]
-    let contentSize = NSSize(width: min(size.width, visibleFrame.width), height: min(height, size.height))
+    var contentSize = NSSize(
+      width: min(max(size.width, preview.minimumContentWidth), visibleFrame.width),
+      height: min(height, size.height, visibleFrame.height)
+    )
+
+    if preview.state.isOpen {
+      preview.clampWidths(to: visibleFrame, state: preview.state)
+      contentSize.width = preview.computeSizeWithPreview(
+        contentSize,
+        state: preview.state,
+        visibleFrame: visibleFrame
+      ).width
+    }
+
     return Defaults[.sidebarPosition].frame(
       contentSize: contentSize,
       visibleFrame: visibleFrame,
@@ -133,7 +147,11 @@ class FloatingPanel<Content: View>: NSPanel, NSWindowDelegate {
   func determinePreviewPlacement() {
     let preview = AppState.shared.preview
     guard !preview.state.isOpen else { return }
-    let newSize = preview.computeSizeWithPreview(frame.size, state: .open)
+    let newSize = preview.computeSizeWithPreview(
+      frame.size,
+      state: .open,
+      visibleFrame: screen?.visibleFrame
+    )
     preview.placement = preview.computePlacement(window: self, for: newSize)
   }
 
@@ -195,6 +213,11 @@ class FloatingPanel<Content: View>: NSPanel, NSWindowDelegate {
       }
     }
     finalFrameSize.width = max(finalFrameSize.width, minContent + minPreview)
+    if Defaults[.popupDisplayMode] == .sidebar,
+       let visibleFrame = screen?.visibleFrame,
+       finalFrameSize.width > visibleFrame.width {
+      finalFrameSize.width = visibleFrame.width
+    }
 
     if !AppState.shared.preview.state.isAnimating {
       var size = frame.size

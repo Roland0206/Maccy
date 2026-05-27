@@ -63,7 +63,7 @@ enum ResizingMode {
 }
 
 @Observable
-class SlideoutController {
+class SlideoutController { // swiftlint:disable:this type_body_length
   let logger = Logger(label: "org.p0deje.Maccy")
   private static let animationDuration = 0.25
 
@@ -124,77 +124,185 @@ class SlideoutController {
     state = newValue
   }
 
+  func clampedWidths(
+    contentWidth requestedContentWidth: CGFloat,
+    slideoutWidth requestedSlideoutWidth: CGFloat,
+    visibleWidth: CGFloat,
+    state newState: SlideoutState
+  ) -> (content: CGFloat, slideout: CGFloat) {
+    var contentWidth = max(minimumContentWidth, requestedContentWidth)
+    guard newState.isOpen else {
+      return (min(contentWidth, visibleWidth).rounded(), 0)
+    }
+
+    var slideoutWidth = max(minimumSlideoutWidth, requestedSlideoutWidth)
+    let maxSlideoutWidth = max(minimumSlideoutWidth, visibleWidth - contentWidth)
+    slideoutWidth = min(slideoutWidth, maxSlideoutWidth)
+
+    if contentWidth + slideoutWidth > visibleWidth {
+      contentWidth = max(minimumContentWidth, visibleWidth - slideoutWidth)
+    }
+
+    return (contentWidth.rounded(), slideoutWidth.rounded())
+  }
+
+  func clampWidths(to visibleFrame: NSRect, state newState: SlideoutState) {
+    let widths = clampedWidths(
+      contentWidth: contentWidth,
+      slideoutWidth: slideoutWidth,
+      visibleWidth: visibleFrame.width,
+      state: newState
+    )
+    contentWidth = widths.content
+    if newState.isOpen {
+      slideoutWidth = widths.slideout
+    }
+  }
+
+  func clampedFrame(_ frame: NSRect, to visibleFrame: NSRect) -> NSRect {
+    var newFrame = frame
+    newFrame.size.width = min(newFrame.width, visibleFrame.width)
+    newFrame.size.height = min(newFrame.height, visibleFrame.height)
+
+    if newFrame.maxX > visibleFrame.maxX {
+      newFrame.origin.x = visibleFrame.maxX - newFrame.width
+    }
+    if newFrame.minX < visibleFrame.minX {
+      newFrame.origin.x = visibleFrame.minX
+    }
+    if newFrame.maxY > visibleFrame.maxY {
+      newFrame.origin.y = visibleFrame.maxY - newFrame.height
+    }
+    if newFrame.minY < visibleFrame.minY {
+      newFrame.origin.y = visibleFrame.minY
+    }
+
+    return newFrame
+  }
+
   func computePlacement(window: NSWindow, for size: NSSize) -> SlideoutPlacement {
-    guard let screen = window.screen?.frame else { return placement }
+    guard let visibleFrame = window.screen?.visibleFrame else { return placement }
     let windowFrame = window.frame
-    if windowFrame.minX + size.width > screen.maxX {
+    if windowFrame.minX + size.width > visibleFrame.maxX {
       return .left
     } else {
       return .right
     }
   }
 
-  func computeSizeWithPreview(_ size: NSSize, state newState: SlideoutState) -> NSSize {
+  func computeSizeWithPreview(
+    _ size: NSSize,
+    state newState: SlideoutState,
+    visibleFrame: NSRect? = nil
+  ) -> NSSize {
     var newSize = size
     if newState.isOpen {
-      newSize.width += slideoutWidth
+      if let visibleFrame {
+        let widths = clampedWidths(
+          contentWidth: newSize.width,
+          slideoutWidth: slideoutWidth,
+          visibleWidth: visibleFrame.width,
+          state: newState
+        )
+        newSize.width = widths.content + widths.slideout
+      } else {
+        newSize.width += slideoutWidth
+      }
+    } else if let visibleFrame {
+      newSize.width = min(max(minimumContentWidth, newSize.width), visibleFrame.width)
     }
+
     let popup = AppState.shared.popup
     newSize.height = popup.preferredHeight(for: popup.height)
+    if let visibleFrame {
+      newSize.height = min(newSize.height, visibleFrame.height)
+    }
     return newSize
   }
 
-  func togglePreview(trigger: SlideoutToggleTrigger = .manual) {
-    if !state.isOpen {
-      let navigator = AppState.shared.navigator
-      guard navigator.leadHistoryItem != nil || navigator.pasteStackSelected else { return }
+  private func canTogglePreview() -> Bool {
+    if state.isOpen {
+      return true
     }
 
-    if trigger == .manual {
-      if state.isOpen {
-        autoOpenSuppressed = true
-      } else {
-        autoOpenSuppressed = false
+    let navigator = AppState.shared.navigator
+    return navigator.leadHistoryItem != nil || navigator.pasteStackSelected
+  }
+
+  private func updateAutoOpenSuppression(trigger: SlideoutToggleTrigger) {
+    guard trigger == .manual else { return }
+    autoOpenSuppressed = state.isOpen
+  }
+
+  private func previewAnimationSize(window: NSWindow, visibleFrame: NSRect?) -> NSSize {
+    togglePreviewStateWithAnimation(windowFrame: window.frame)
+    if let visibleFrame {
+      clampWidths(to: visibleFrame, state: state)
+    }
+
+    var newSize = window.frame.size
+    newSize.width = contentWidth
+    newSize = computeSizeWithPreview(newSize, state: state, visibleFrame: visibleFrame)
+    if state.isOpen {
+      placement = computePlacement(window: window, for: newSize)
+    }
+    return newSize
+  }
+
+  private func previewAnimationOrigin(window: NSWindow, newSize: NSSize) -> NSPoint {
+    var newOrigin = windowAnimationOrigin ?? window.frame.origin
+    newOrigin.y += (window.frame.height - newSize.height)
+
+    guard placement == .left else { return newOrigin }
+    if windowAnimationOriginBaseState == .closed && state.isOpen {
+      newOrigin.x -= slideoutWidth
+    } else if windowAnimationOriginBaseState == .open && !state.isOpen {
+      newOrigin.x += slideoutWidth
+    }
+    return newOrigin
+  }
+
+  private func animatePreview(
+    window: NSWindow,
+    newSize: NSSize,
+    visibleFrame: NSRect?,
+    expectedAnimationState: SlideoutState
+  ) {
+    NSAnimationContext.runAnimationGroup { (context) in
+      context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+      context.completionHandler = {
+        if self.state == expectedAnimationState {
+          self.state = expectedAnimationState.animationDone()
+        }
       }
-    }
+      context.duration = Self.animationDuration
 
+      var newFrame = NSRect(
+        origin: previewAnimationOrigin(window: window, newSize: newSize),
+        size: newSize
+      )
+      if let visibleFrame {
+        newFrame = clampedFrame(newFrame, to: visibleFrame)
+      }
+      window.animator().setFrame(newFrame, display: true)
+    }
+  }
+
+  func togglePreview(trigger: SlideoutToggleTrigger = .manual) {
+    guard canTogglePreview() else { return }
+
+    updateAutoOpenSuppression(trigger: trigger)
     cancelAutoOpen()
     withAnimation(.easeInOut(duration: Self.animationDuration), completionCriteria: .removed) {
       if let window = nswindow {
-        togglePreviewStateWithAnimation(windowFrame: window.frame)
-        var newSize = window.frame.size
-        newSize.width = contentWidth
-        newSize = computeSizeWithPreview(newSize, state: self.state)
-        if state.isOpen {
-          placement = computePlacement(window: window, for: newSize)
-        }
-
-        let expectedAnimationState = state
-        NSAnimationContext.runAnimationGroup { (context) in
-          var newOrigin = windowAnimationOrigin ?? window.frame.origin
-          newOrigin.y += (window.frame.height - newSize.height)
-
-          if placement == .left {
-            if windowAnimationOriginBaseState == .closed && state.isOpen {
-              newOrigin.x -= slideoutWidth
-            } else if windowAnimationOriginBaseState == .open
-              && !state.isOpen {
-              newOrigin.x += slideoutWidth
-            }
-            // Otherwise the base is the desired position
-          }
-          context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-          context.completionHandler = {
-            if self.state == expectedAnimationState {
-              self.state = expectedAnimationState.animationDone()
-            }
-          }
-          context.duration = Self.animationDuration
-          window.animator().setFrame(
-            NSRect(origin: newOrigin, size: newSize),
-            display: true
-          )
-        }
+        let visibleFrame = window.screen?.visibleFrame
+        let newSize = previewAnimationSize(window: window, visibleFrame: visibleFrame)
+        animatePreview(
+          window: window,
+          newSize: newSize,
+          visibleFrame: visibleFrame,
+          expectedAnimationState: state
+        )
       }
     } completion: {
     }
