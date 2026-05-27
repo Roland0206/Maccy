@@ -513,6 +513,12 @@ private struct SearchDocumentRow: FetchableRecord {
   let title: String?
   let text: String?
 
+  init(itemID: Int64, title: String?, text: String?) {
+    self.itemID = itemID
+    self.title = title
+    self.text = text
+  }
+
   init(row: Row) throws {
     itemID = row["item_id"]
     title = row["title"]
@@ -541,6 +547,80 @@ enum ArchiveDatabaseFeature {
   static var isEnabled: Bool {
     CommandLine.arguments.contains(launchArgument) ||
       ProcessInfo.processInfo.environment[environmentVariable] == "1"
+  }
+}
+
+final class ArchiveMaintenanceScheduler {
+  private let queue: DispatchQueue
+  private let lock = NSLock()
+  private var timer: DispatchSourceTimer?
+  private var isRunning = false
+
+  init(queue: DispatchQueue = DispatchQueue(label: "org.p0deje.Maccy.archive-maintenance", qos: .utility)) {
+    self.queue = queue
+  }
+
+  var isScheduled: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return timer != nil
+  }
+
+  deinit {
+    stop()
+  }
+
+  func start(
+    interval: TimeInterval,
+    leeway: TimeInterval = 60,
+    operation: @escaping () -> Void
+  ) {
+    let intervalMilliseconds = max(Int(interval * 1000), 1)
+    let leewayMilliseconds = max(Int(leeway * 1000), 0)
+    let repeating = DispatchTimeInterval.milliseconds(intervalMilliseconds)
+    let newTimer = DispatchSource.makeTimerSource(queue: queue)
+    newTimer.schedule(
+      deadline: .now() + repeating,
+      repeating: repeating,
+      leeway: .milliseconds(leewayMilliseconds)
+    )
+    newTimer.setEventHandler { [weak self] in
+      _ = self?.runOnceIfIdle(operation)
+    }
+
+    stop()
+    lock.lock()
+    timer = newTimer
+    lock.unlock()
+    newTimer.resume()
+  }
+
+  func stop() {
+    lock.lock()
+    let activeTimer = timer
+    timer = nil
+    lock.unlock()
+    activeTimer?.cancel()
+  }
+
+  @discardableResult
+  func runOnceIfIdle(_ operation: () throws -> Void) rethrows -> Bool {
+    lock.lock()
+    guard !isRunning else {
+      lock.unlock()
+      return false
+    }
+    isRunning = true
+    lock.unlock()
+
+    defer {
+      lock.lock()
+      isRunning = false
+      lock.unlock()
+    }
+
+    try operation()
+    return true
   }
 }
 
@@ -847,9 +927,7 @@ final class ArchiveDatabase {
     let expiredRepresentationIDs = candidates.map(\.representationID)
     guard !expiredRepresentationIDs.isEmpty else { return ArchiveMaintenanceReport() }
 
-    let affectedItemIDs = Set(candidates
-      .filter { expiredRepresentationIDs.contains($0.representationID) }
-      .map(\.itemID))
+    let affectedItemIDs = Array(Set(candidates.map(\.itemID)))
     let itemIDsWithNoRepresentations = try pool.write { db -> [Int64] in
       try Self.deleteRows(
         from: "clipboard_representations",
@@ -857,7 +935,13 @@ final class ArchiveDatabase {
         values: expiredRepresentationIDs,
         db: db
       )
-      return try Self.itemIDsWithoutRepresentations(Array(affectedItemIDs), db: db)
+      try Self.refreshSearchDocumentsAfterRepresentationRetention(
+        for: affectedItemIDs,
+        payloadStore: payloadStore,
+        db: db
+      )
+      try Self.rebuildSearchIndex(db)
+      return try Self.itemIDsWithoutRepresentations(affectedItemIDs, db: db)
     }
 
     let softDeletedCount = try softDeleteItems(
@@ -1523,6 +1607,124 @@ final class ArchiveDatabase {
     )
   }
 
+  private static func refreshSearchDocumentsAfterRepresentationRetention(
+    for itemIDs: [Int64],
+    payloadStore: ArchivePayloadStore,
+    db: Database
+  ) throws {
+    guard !itemIDs.isEmpty else { return }
+
+    try deleteSearchDocuments(for: itemIDs, db: db)
+    for row in try retainedSearchDocumentRows(for: itemIDs, payloadStore: payloadStore, db: db) {
+      try replaceSearchDocument(itemID: row.itemID, title: row.title, text: row.text, db: db)
+    }
+  }
+
+  private static func deleteSearchDocuments(for itemIDs: [Int64], db: Database) throws {
+    guard !itemIDs.isEmpty else { return }
+    try db.execute(
+      sql: """
+        DELETE FROM clipboard_search_documents
+        WHERE item_id IN (\(placeholders(count: itemIDs.count)))
+        """,
+      arguments: StatementArguments(itemIDs)
+    )
+  }
+
+  private static func retainedSearchDocumentRows(
+    for itemIDs: [Int64],
+    payloadStore: ArchivePayloadStore,
+    db: Database
+  ) throws -> [SearchDocumentRow] {
+    let itemRows = try Row.fetchAll(
+      db,
+      sql: """
+        SELECT id, title
+        FROM clipboard_items
+        WHERE id IN (\(placeholders(count: itemIDs.count)))
+          AND deleted_at IS NULL
+        ORDER BY id
+        """,
+      arguments: StatementArguments(itemIDs)
+    )
+    guard !itemRows.isEmpty else { return [] }
+
+    let representations = try ArchiveRepresentationSnapshot.fetchAll(
+      db,
+      sql: """
+        SELECT item_id, type, value, size, payload_hash, storage_kind, relative_path
+        FROM clipboard_representations
+        WHERE item_id IN (\(placeholders(count: itemIDs.count)))
+        ORDER BY item_id, id
+        """,
+      arguments: StatementArguments(itemIDs)
+    )
+    let representationsByItemID = Dictionary(grouping: representations, by: \.itemID)
+
+    return try itemRows.compactMap { itemRow in
+      let itemID: Int64 = itemRow["id"]
+      guard let searchText = try retainedSearchText(
+        for: representationsByItemID[itemID] ?? [],
+        payloadStore: payloadStore
+      ) else {
+        return nil
+      }
+
+      return SearchDocumentRow(itemID: itemID, title: itemRow["title"], text: searchText)
+    }
+  }
+
+  private static func retainedSearchText(
+    for representations: [ArchiveRepresentationSnapshot],
+    payloadStore: ArchivePayloadStore
+  ) throws -> String? {
+    let text = try representations.compactMap {
+      try searchText(for: $0, payloadStore: payloadStore)
+    }.joined(separator: "\n")
+
+    return nonEmptySearchText(text)
+  }
+
+  private static func searchText(
+    for representation: ArchiveRepresentationSnapshot,
+    payloadStore: ArchivePayloadStore
+  ) throws -> String? {
+    let value = try representation.resolvingPayload(with: payloadStore).value
+
+    switch NSPasteboard.PasteboardType(representation.type) {
+    case .string:
+      return nonEmptySearchText(String(data: value, encoding: .utf8))
+    case .html:
+      return attributedStringText(from: value, documentType: .html)
+    case .rtf:
+      return attributedStringText(from: value, documentType: .rtf)
+    case .fileURL:
+      return nonEmptySearchText(URL(dataRepresentation: value, relativeTo: nil)?.path)
+    default:
+      return nil
+    }
+  }
+
+  private static func attributedStringText(
+    from data: Data,
+    documentType: NSAttributedString.DocumentType
+  ) -> String? {
+    if let attributedString = try? NSAttributedString(
+      data: data,
+      options: [.documentType: documentType],
+      documentAttributes: nil
+    ) {
+      return nonEmptySearchText(attributedString.string)
+    }
+
+    return nonEmptySearchText(String(data: data, encoding: .utf8))
+  }
+
+  private static func nonEmptySearchText(_ text: String?) -> String? {
+    let trimmedText = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmedText?.isEmpty == false ? trimmedText : nil
+  }
+
   private static func insertPin(
     _ pin: String,
     item: HistoryItem,
@@ -1789,6 +1991,8 @@ final class ArchiveDatabase {
 }
 
 enum ArchiveDatabaseBootstrap {
+  private static let retentionMaintenanceScheduler = ArchiveMaintenanceScheduler()
+  private static let retentionMaintenanceInterval: TimeInterval = 60 * 60
   private static var database: ArchiveDatabase?
 
   static func bootstrapIfEnabled() {
@@ -1799,11 +2003,10 @@ enum ArchiveDatabaseBootstrap {
     do {
       let database = try sharedDatabase()
       Task.detached(priority: .background) {
-        do {
-          _ = try database.performRetentionMaintenance()
-        } catch {
-          NSLog("Maccy archive retention maintenance failed: \(error.localizedDescription)")
-        }
+        runRetentionMaintenance(database)
+      }
+      retentionMaintenanceScheduler.start(interval: retentionMaintenanceInterval) {
+        runRetentionMaintenance(database)
       }
     } catch {
       NSLog("Maccy archive database bootstrap failed: \(error.localizedDescription)")
@@ -1833,6 +2036,16 @@ enum ArchiveDatabaseBootstrap {
     } catch {
       NSLog("Maccy archive mode store failed: \(error.localizedDescription)")
       return nil
+    }
+  }
+
+  private static func runRetentionMaintenance(_ database: ArchiveDatabase) {
+    do {
+      _ = try retentionMaintenanceScheduler.runOnceIfIdle {
+        _ = try database.performRetentionMaintenance()
+      }
+    } catch {
+      NSLog("Maccy archive retention maintenance failed: \(error.localizedDescription)")
     }
   }
 

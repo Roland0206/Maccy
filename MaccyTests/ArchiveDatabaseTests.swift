@@ -341,7 +341,44 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertEqual(report.expiredItemsSoftDeleted, 0)
     XCTAssertNil(item.deletedAt)
     XCTAssertEqual(item.representations.map(\.type), [NSPasteboard.PasteboardType.string.rawValue])
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "kept"), [item.id])
     XCTAssertFalse(FileManager.default.fileExists(atPath: payloadStore.fileURL(forRelativePath: imagePath).path))
+  }
+
+  @MainActor
+  func testRetentionPurgesExpiredRepresentationSearchDocumentsAndRebuildsIndex() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    try database.importLegacyHistoryItems([
+      historyItem(
+        title: "Binary Holder",
+        contents: [
+          content(.string, Data("secret token".utf8)),
+          content(.png, Data("retained image".utf8)),
+        ],
+        lastCopiedAt: 100
+      ),
+    ])
+    let itemID = try XCTUnwrap(database.archiveSnapshot().items.first?.id)
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "secret"), [itemID])
+
+    let report = try database.performRetentionMaintenance(
+      configuration: ArchiveRetentionConfiguration(
+        plainText: .sevenDays,
+        images: .forever,
+        vacuumPageCount: 0
+      ),
+      now: Date(timeIntervalSince1970: 100 + 8 * 24 * 60 * 60),
+      batchLimit: 10
+    )
+    let item = try XCTUnwrap(database.archiveSnapshot().items.first)
+
+    XCTAssertEqual(report.expiredRepresentationsDeleted, 1)
+    XCTAssertEqual(report.expiredItemsSoftDeleted, 0)
+    XCTAssertNil(item.deletedAt)
+    XCTAssertEqual(item.representations.map(\.type), [NSPasteboard.PasteboardType.png.rawValue])
+    XCTAssertNil(item.searchTitle)
+    XCTAssertNil(item.searchText)
+    XCTAssertEqual(try database.searchIndexItemIDs(matching: "secret"), [])
   }
 
   @MainActor
@@ -452,6 +489,30 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertEqual(try database.archiveSnapshot().items, [])
     XCTAssertEqual(try database.tombstones(), [])
     XCTAssertFalse(FileManager.default.fileExists(atPath: payloadStore.fileURL(forRelativePath: relativePath).path))
+  }
+
+  func testArchiveMaintenanceSchedulerInstallsRecurringTimer() {
+    let scheduler = ArchiveMaintenanceScheduler()
+
+    XCTAssertFalse(scheduler.isScheduled)
+    scheduler.start(interval: 60) {}
+    XCTAssertTrue(scheduler.isScheduled)
+    scheduler.stop()
+    XCTAssertFalse(scheduler.isScheduled)
+  }
+
+  func testArchiveMaintenanceSchedulerSkipsOverlappingRuns() {
+    let scheduler = ArchiveMaintenanceScheduler()
+    var reentrantWasSkipped = false
+
+    let outerRan = scheduler.runOnceIfIdle {
+      reentrantWasSkipped = !scheduler.runOnceIfIdle {}
+    }
+    let laterRan = scheduler.runOnceIfIdle {}
+
+    XCTAssertTrue(outerRan)
+    XCTAssertTrue(reentrantWasSkipped)
+    XCTAssertTrue(laterRan)
   }
 
   func testFTS5CapabilitySmokeTest() throws {
