@@ -134,7 +134,9 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     cachedPopupRowIDs = Set(page.rows.map(\.id))
     nextRecentRowsCursor = page.nextRecentCursor
 
-    limitHistorySize(to: Defaults[.size])
+    if !(popupHistoryStore is any PopupHistoryWriteStore) {
+      limitHistorySize(to: Defaults[.size])
+    }
 
     updateShortcuts()
     // Ensure that panel size is proper *after* loading all items.
@@ -220,6 +222,8 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
 
   @MainActor
   func insertIntoStorage(_ item: HistoryItem) throws {
+    guard !(popupHistoryStore is any PopupHistoryWriteStore) else { return }
+
     logger.info("Inserting item with id '\(item.title)'")
     try historyStore.insert(item)
   }
@@ -227,6 +231,10 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   @discardableResult
   @MainActor
   func add(_ item: HistoryItem) -> HistoryItemDecorator {
+    if let writeStore = popupHistoryStore as? any PopupHistoryWriteStore {
+      return addToPopupStore(item, writeStore: writeStore)
+    }
+
     if #available(macOS 15.0, *) {
       try? History.shared.insertIntoStorage(item)
     } else {
@@ -285,6 +293,57 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
     }
 
     return itemDecorator
+  }
+
+  @MainActor
+  private func addToPopupStore(
+    _ item: HistoryItem,
+    writeStore: any PopupHistoryWriteStore
+  ) -> HistoryItemDecorator {
+    do {
+      let replacingRow = isModified(item).flatMap { popupRowsByMaterializedItemID[ObjectIdentifier($0)] }
+      guard let result = try writeStore.upsert(item, replacing: replacingRow) else {
+        return HistoryItemDecorator(item)
+      }
+
+      let materializedItem = try popupHistoryStore.materialize(result.row)
+      if let existingIndex = all.firstIndex(where: { popupRow(for: $0)?.id == result.row.id }) {
+        let existingItem = all.remove(at: existingIndex)
+        popupRowsByMaterializedItemID.removeValue(forKey: ObjectIdentifier(existingItem.item))
+      } else if result.inserted {
+        Task {
+          Notifier.notify(body: materializedItem.title, sound: .write)
+        }
+      }
+
+      sessionLog[Clipboard.shared.changeCount] = materializedItem
+      cachedPopupRowIDs.insert(result.row.id)
+      let itemDecorator = HistoryItemDecorator(materializedItem)
+      popupRowsByMaterializedItemID[ObjectIdentifier(materializedItem)] = result.row
+      insertMaterializedDecorator(itemDecorator)
+      return itemDecorator
+    } catch {
+      logger.error("Failed to write archive history item: \(error.localizedDescription)")
+      return HistoryItemDecorator(item)
+    }
+  }
+
+  @MainActor
+  private func insertMaterializedDecorator(_ itemDecorator: HistoryItemDecorator) {
+    if let pin = itemDecorator.item.pin {
+      itemDecorator.shortcuts = KeyShortcut.create(character: pin)
+    }
+
+    let sortedItems = sorter.sort(all.map(\.item) + [itemDecorator.item])
+    if let index = sortedItems.firstIndex(of: itemDecorator.item) {
+      all.insert(itemDecorator, at: index)
+    } else {
+      all.insert(itemDecorator, at: 0)
+    }
+
+    items = all
+    updateUnpinnedShortcuts()
+    AppState.shared.popup.needsResize = true
   }
 
   @MainActor
