@@ -114,6 +114,11 @@ struct PopupHistorySearchPage: Equatable {
   let nextOffset: Int?
 }
 
+struct PopupHistoryWriteResult: Equatable {
+  let row: PopupHistoryRow
+  let inserted: Bool
+}
+
 struct PopupHistoryPage: Equatable {
   let pinnedRows: [PopupHistoryRow]
   let recentRows: [PopupHistoryRow]
@@ -150,6 +155,11 @@ protocol PopupHistoryStore {
 @MainActor
 protocol ArchiveSearchHistoryStore {
   func search(_ request: ArchiveSearchRequest) async throws -> PopupHistorySearchPage
+}
+
+@MainActor
+protocol PopupHistoryWriteStore {
+  func upsert(_ item: HistoryItem, replacing row: PopupHistoryRow?) throws -> PopupHistoryWriteResult?
 }
 
 @MainActor
@@ -227,7 +237,7 @@ struct SwiftDataPopupHistoryStore: PopupHistoryStore {
   }
 }
 
-struct ArchivePopupHistoryStore: PopupHistoryStore, ArchiveSearchHistoryStore {
+struct ArchivePopupHistoryStore: PopupHistoryStore, ArchiveSearchHistoryStore, PopupHistoryWriteStore {
   nonisolated(unsafe) private let database: ArchiveDatabase
 
   nonisolated init(database: ArchiveDatabase) {
@@ -282,6 +292,28 @@ struct ArchivePopupHistoryStore: PopupHistoryStore, ArchiveSearchHistoryStore {
     return PopupHistorySearchPage(
       rows: page.items.map { PopupHistoryRow(archiveItem: $0) },
       nextOffset: page.nextOffset
+    )
+  }
+
+  @MainActor
+  func upsert(_ item: HistoryItem, replacing row: PopupHistoryRow?) throws -> PopupHistoryWriteResult? {
+    let replacingItemID: Int64?
+    if let row {
+      guard case let .archive(id) = row.source else {
+        throw PopupHistoryStoreError.unsupportedRow(row.id)
+      }
+      replacingItemID = id
+    } else {
+      replacingItemID = nil
+    }
+
+    guard let result = try database.upsertLiveHistoryItem(item, replacingItemID: replacingItemID) else {
+      return nil
+    }
+
+    return PopupHistoryWriteResult(
+      row: PopupHistoryRow(archiveItem: result.item),
+      inserted: result.inserted
     )
   }
 

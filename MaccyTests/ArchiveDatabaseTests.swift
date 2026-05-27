@@ -1016,6 +1016,57 @@ final class ArchiveDatabaseTests: XCTestCase {
   }
 
   @MainActor
+  func testArchivePopupHistoryStoreUpsertsLiveCopyAndReloadsFromArchive() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let store = ArchivePopupHistoryStore(database: database)
+    let item = historyItem(title: "Live", text: "live text", lastCopiedAt: 200)
+
+    let result = try XCTUnwrap(store.upsert(item, replacing: nil))
+    let reloaded = try store.loadInitialRows(recentLimit: 10)
+    let materialized = try store.materialize(result.row)
+
+    XCTAssertTrue(result.inserted)
+    XCTAssertEqual(reloaded.recentRows.map(\.title), ["Live"])
+    XCTAssertEqual(materialized.text, "live text")
+    XCTAssertEqual(try database.archiveSnapshot().itemCount, 1)
+  }
+
+  @MainActor
+  func testArchivePopupHistoryStoreUpdatesDuplicateLiveCopyByHash() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let store = ArchivePopupHistoryStore(database: database)
+    let first = historyItem(title: "First", text: "same", lastCopiedAt: 100)
+    let second = historyItem(title: "Second", text: "same", lastCopiedAt: 200)
+
+    let firstResult = try XCTUnwrap(store.upsert(first, replacing: nil))
+    let secondResult = try XCTUnwrap(store.upsert(second, replacing: nil))
+    let rows = try store.loadInitialRows(recentLimit: 10).recentRows
+
+    XCTAssertTrue(firstResult.inserted)
+    XCTAssertFalse(secondResult.inserted)
+    XCTAssertEqual(firstResult.row.id, secondResult.row.id)
+    XCTAssertEqual(rows.map(\.title), ["First"])
+    XCTAssertEqual(rows.first?.numberOfCopies, 2)
+    XCTAssertEqual(rows.first?.lastCopiedAt, Date(timeIntervalSince1970: 200))
+    XCTAssertEqual(try database.archiveSnapshot().itemCount, 1)
+  }
+
+  @MainActor
+  func testHistoryAddWritesArchiveStoreWithoutLegacyInsert() async throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let store = ArchivePopupHistoryStore(database: database)
+    let legacyStore = RecordingLegacyHistoryStore(items: [])
+    let history = History(historyStore: legacyStore, popupHistoryStore: store)
+
+    history.add(historyItem(title: "Live", text: "live text", lastCopiedAt: 200))
+    try await history.load()
+
+    XCTAssertEqual(legacyStore.insertCallCount, 0)
+    XCTAssertEqual(history.items.map(\.item.title), ["Live"])
+    XCTAssertEqual(try database.archiveSnapshot().itemCount, 1)
+  }
+
+  @MainActor
   func testArchivePopupHistoryStoreDeletesVisibleRows() throws {
     let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
     try database.importLegacyHistoryItems([
@@ -1333,6 +1384,7 @@ final class ArchiveDatabaseTests: XCTestCase {
 private final class RecordingLegacyHistoryStore: LegacyHistoryStore {
   private(set) var items: [HistoryItem]
   private(set) var loadAllCallCount = 0
+  private(set) var insertCallCount = 0
   private(set) var deleteCallCount = 0
   private(set) var deleteAllCallCount = 0
 
@@ -1350,6 +1402,7 @@ private final class RecordingLegacyHistoryStore: LegacyHistoryStore {
   }
 
   func insert(_ item: HistoryItem) throws {
+    insertCallCount += 1
     items.append(item)
   }
 

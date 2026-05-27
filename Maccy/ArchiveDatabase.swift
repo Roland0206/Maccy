@@ -46,6 +46,11 @@ struct ArchiveImportReport: Equatable {
   var errorCount: Int { errors.count }
 }
 
+struct ArchiveLiveWriteResult: Equatable {
+  let item: ArchiveItemSnapshot
+  let inserted: Bool
+}
+
 struct ArchiveRecentPageCursor: Equatable {
   let lastCopiedAt: String
   let id: Int64
@@ -952,6 +957,66 @@ final class ArchiveDatabase {
     return report
   }
 
+  @MainActor
+  func upsertLiveHistoryItem(_ item: HistoryItem, replacingItemID: Int64? = nil) throws -> ArchiveLiveWriteResult? {
+    guard Self.shouldImportLegacyItem(item) else { return nil }
+
+    let archiveContents = Self.archiveableContents(from: item.contents)
+      .map(\.content)
+      .filter { $0.value != nil }
+    guard !archiveContents.isEmpty else { return nil }
+
+    let writeResult = try pool.write { db -> (itemID: Int64, inserted: Bool) in
+      let sourceAppID = try Self.upsertSourceApp(item.application, db: db)
+      let itemHash = Self.itemHash(for: archiveContents)
+      let existingItemID = try replacingItemID.flatMap { id in
+        try Self.visibleItemID(id: id, db: db)
+      } ?? Self.visibleItemID(itemHash: itemHash, db: db)
+
+      let itemID: Int64
+      let inserted: Bool
+      if let existingItemID {
+        itemID = existingItemID
+        inserted = false
+        try Self.updateClipboardItem(
+          id: existingItemID,
+          item: item,
+          itemHash: itemHash,
+          sourceAppID: sourceAppID,
+          db: db
+        )
+        try Self.replaceRepresentations(
+          archiveContents,
+          itemID: existingItemID,
+          payloadStore: payloadStore,
+          inlinePayloadThresholdBytes: inlinePayloadThresholdBytes,
+          db: db
+        )
+      } else {
+        itemID = try Self.insertClipboardItem(
+          item,
+          contents: archiveContents,
+          sourceAppID: sourceAppID,
+          db: db
+        )
+        inserted = true
+        try Self.insertRepresentations(
+          archiveContents,
+          itemID: itemID,
+          payloadStore: payloadStore,
+          inlinePayloadThresholdBytes: inlinePayloadThresholdBytes,
+          db: db
+        )
+      }
+
+      try Self.insertSearchDocument(title: item.title, contents: archiveContents, itemID: itemID, db: db)
+      return (itemID, inserted)
+    }
+
+    guard let snapshot = try self.item(id: writeResult.itemID) else { return nil }
+    return ArchiveLiveWriteResult(item: snapshot, inserted: writeResult.inserted)
+  }
+
   func archiveSnapshot() throws -> ArchiveSnapshot {
     try pool.read { db in
       ArchiveSnapshot(items: try Self.fetchArchiveItems(
@@ -1634,6 +1699,9 @@ final class ArchiveDatabase {
         try db.execute(sql: "ALTER TABLE clipboard_representations ADD COLUMN relative_path TEXT")
       }
     }
+    migrator.registerMigration("v6_live_write_hash_index", foreignKeyChecks: .immediate) { db in
+      try db.execute(sql: Self.liveWriteHashIndexSQL)
+    }
     return migrator
   }
 
@@ -1847,6 +1915,95 @@ final class ArchiveDatabase {
     )
 
     return db.lastInsertedRowID
+  }
+
+  private static func visibleItemID(id: Int64, db: Database) throws -> Int64? {
+    try Int64.fetchOne(
+      db,
+      sql: "SELECT id FROM clipboard_items WHERE id = ? AND deleted_at IS NULL",
+      arguments: [id]
+    )
+  }
+
+  private static func visibleItemID(itemHash: String, db: Database) throws -> Int64? {
+    try Int64.fetchOne(
+      db,
+      sql: """
+        SELECT id
+        FROM clipboard_items
+        WHERE item_hash = ?
+          AND deleted_at IS NULL
+        ORDER BY last_seen_at DESC, id DESC
+        LIMIT 1
+      """,
+      arguments: [itemHash]
+    )
+  }
+
+  private static func updateClipboardItem(
+    id: Int64,
+    item: HistoryItem,
+    itemHash: String,
+    sourceAppID: Int64?,
+    db: Database
+  ) throws {
+    try db.execute(
+      sql: """
+        UPDATE clipboard_items
+        SET source_app_id = COALESCE(source_app_id, ?),
+            item_hash = ?,
+            title = COALESCE(NULLIF(title, ''), ?),
+            last_seen_at = ?,
+            change_count = change_count + ?,
+            deleted_at = NULL
+        WHERE id = ?
+      """,
+      arguments: [
+        sourceAppID,
+        itemHash,
+        item.title,
+        archiveTimestamp(item.lastCopiedAt),
+        max(item.numberOfCopies, 1),
+        id,
+      ]
+    )
+  }
+
+  private static func insertRepresentations(
+    _ contents: [HistoryItemContent],
+    itemID: Int64,
+    payloadStore: ArchivePayloadStore,
+    inlinePayloadThresholdBytes: Int,
+    db: Database
+  ) throws {
+    for content in contents {
+      guard let value = content.value else { continue }
+      try insertRepresentation(
+        content,
+        value: value,
+        itemID: itemID,
+        payloadStore: payloadStore,
+        inlinePayloadThresholdBytes: inlinePayloadThresholdBytes,
+        db: db
+      )
+    }
+  }
+
+  private static func replaceRepresentations(
+    _ contents: [HistoryItemContent],
+    itemID: Int64,
+    payloadStore: ArchivePayloadStore,
+    inlinePayloadThresholdBytes: Int,
+    db: Database
+  ) throws {
+    try db.execute(sql: "DELETE FROM clipboard_representations WHERE item_id = ?", arguments: [itemID])
+    try insertRepresentations(
+      contents,
+      itemID: itemID,
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: inlinePayloadThresholdBytes,
+      db: db
+    )
   }
 
   private static func insertRepresentation(
@@ -2648,6 +2805,12 @@ private extension ArchiveDatabase {
     WHERE deleted_at IS NULL
     """
 
+  static let liveWriteHashIndexSQL = """
+    CREATE INDEX IF NOT EXISTS clipboard_items_visible_hash_index
+    ON clipboard_items(item_hash, last_seen_at DESC, id DESC)
+    WHERE deleted_at IS NULL
+    """
+
   static func recentItemsSQL(hasCursor: Bool) -> String {
     let cursorPredicate = hasCursor ? """
 
@@ -2790,6 +2953,7 @@ private extension ArchiveDatabase {
     "CREATE INDEX clipboard_items_source_app_id_index ON clipboard_items(source_app_id)",
     "CREATE INDEX clipboard_items_last_seen_at_index ON clipboard_items(last_seen_at)",
     recentItemsIndexSQL,
+    liveWriteHashIndexSQL,
     """
     CREATE TABLE clipboard_representations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
