@@ -28,6 +28,8 @@
 "ImageHeightTooltip" = "Maximum image preview height.\nDefault: 40.\nHint: Set to 16 to look like text items.";
 "PreviewDelay" = "Preview delay:";
 "PreviewDelayTooltip" = "Delay in milliseconds until a preview popup is shown.\nDefault: 1500.";
+"AutoOpenPreview" = "Open preview automatically";
+"AutoOpenPreviewTooltip" = "Automatically open the full preview after selecting an item. Disable to keep actions inline in the list until preview is opened manually.";
 "HighlightMatches" = "Highlight matches:";
 "HighlightMatchColor" = "Color";
 "HighlightMatchBold" = "Bold";

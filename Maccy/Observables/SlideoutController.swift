@@ -224,12 +224,14 @@ class SlideoutController {
     cancelAutoOpen()
 
     guard autoOpenEnabled else { return }
+    guard Defaults[.autoOpenPreview] else { return }
     guard !autoOpenSuppressed else { return }
     guard !state.isOpen else { return }
 
     autoOpenTask = Task { @MainActor in
       try? await Task.sleep(for: .milliseconds(Defaults[.previewDelay]))
       guard !Task.isCancelled else { return }
+      guard Defaults[.autoOpenPreview] else { return }
 
       if !state.isOpen {
         togglePreview(trigger: .autoOpen)

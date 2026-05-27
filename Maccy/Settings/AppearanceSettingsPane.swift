@@ -11,6 +11,7 @@ struct AppearanceSettingsPane: View {
   @Default(.pinTo) private var pinTo
   @Default(.imageMaxHeight) private var imageHeight
   @Default(.previewDelay) private var previewDelay
+  @Default(.autoOpenPreview) private var autoOpenPreview
   @Default(.highlightMatch) private var highlightMatch
   @Default(.menuIcon) private var menuIcon
   @Default(.showInStatusBar) private var showInStatusBar
@@ -127,6 +128,11 @@ struct AppearanceSettingsPane: View {
       }
 
       Settings.Section(label: { Text("PreviewDelay", tableName: "AppearanceSettings") }) {
+        Defaults.Toggle(key: .autoOpenPreview) {
+          Text("AutoOpenPreview", tableName: "AppearanceSettings")
+        }
+        .help(Text("AutoOpenPreviewTooltip", tableName: "AppearanceSettings"))
+
         HStack {
           TextField("", value: $previewDelay, formatter: previewDelayFormatter)
             .frame(width: 120)
@@ -134,6 +140,7 @@ struct AppearanceSettingsPane: View {
           Stepper("", value: $previewDelay, in: 200...100_000)
             .labelsHidden()
         }
+        .disabled(!autoOpenPreview)
       }
 
       Settings.Section(

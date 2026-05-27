@@ -40,6 +40,7 @@ struct ListItemView<Title: View, ID: Hashable>: View {
   var selectionIndex: Int?
   var help: LocalizedStringKey?
   var selectionAppearance: SelectionAppearance = .none
+  var trailingAction: AnyView? = nil
   @ViewBuilder var title: () -> Title
 
   @Default(.showApplicationIcons) private var showIcons
@@ -81,6 +82,10 @@ struct ListItemView<Title: View, ID: Hashable>: View {
       Spacer()
 
       HStack(spacing: 5) {
+        if let trailingAction {
+          trailingAction
+        }
+
         if let index = selectionIndex {
           Text("\(index + 1)")
             .font(.caption)

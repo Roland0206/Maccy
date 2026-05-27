@@ -91,6 +91,7 @@ extension Defaults.Keys {
   static let popupRecentPageSize = Key<Int>("popupRecentPageSize", default: 200)
   static let popupScreen = Key<Int>("popupScreen", default: 0)
   static let previewDelay = Key<Int>("previewDelay", default: 1500)
+  static let autoOpenPreview = Key<Bool>("autoOpenPreview", default: true)
   static let removeFormattingByDefault = Key<Bool>("removeFormattingByDefault", default: false)
   static let searchMode = Key<Search.Mode>("searchMode", default: .exact)
   static let showFooter = Key<Bool>("showFooter", default: true)
