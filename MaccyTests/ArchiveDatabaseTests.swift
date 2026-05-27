@@ -34,6 +34,28 @@ final class ArchiveDatabaseTests: XCTestCase {
     try super.tearDownWithError()
   }
 
+  func testArchiveDatabaseFeatureDefaultsToEnabled() {
+    XCTAssertTrue(ArchiveDatabaseFeature.isEnabled(arguments: [], environment: [:]))
+  }
+
+  func testArchiveDatabaseFeatureCanBeDisabledByLaunchArgument() {
+    XCTAssertFalse(
+      ArchiveDatabaseFeature.isEnabled(
+        arguments: ["Maccy", "--disable-archive-database"],
+        environment: [:]
+      )
+    )
+  }
+
+  func testArchiveDatabaseFeatureCanBeDisabledByEnvironment() {
+    XCTAssertFalse(
+      ArchiveDatabaseFeature.isEnabled(
+        arguments: [],
+        environment: ["MACCY_ARCHIVE_DATABASE_DISABLED": "1"]
+      )
+    )
+  }
+
   func testOpenMigratesTempDatabaseAndReportsHealthyPragmas() throws {
     let databaseURL = tempDirectory.appending(path: "Archive.sqlite")
     let database = try ArchiveDatabase.open(at: databaseURL)

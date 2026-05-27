@@ -18,12 +18,6 @@
 		2F0EC7892E7743D9003E2EA9 /* HoverSelectionModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F0EC7882E7743D9003E2EA9 /* HoverSelectionModifier.swift */; };
 		2F1091D72F2B6E8400F5C454 /* AsyncView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F1091D62F2B6E8100F5C454 /* AsyncView.swift */; };
 		2F12271E2E5C932200A1592A /* Logging in Frameworks */ = {isa = PBXBuildFile; productRef = 2F12271D2E5C932200A1592A /* Logging */; };
-		2F6A00022F30000000000005 /* ArchiveDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00012F30000000000005 /* ArchiveDatabase.swift */; };
-		2F6A00042F30000000000005 /* ArchiveDatabaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00032F30000000000005 /* ArchiveDatabaseTests.swift */; };
-		2F6A00112F30001100000001 /* ArchiveMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00102F30001100000001 /* ArchiveMode.swift */; };
-		2F6A00132F30001100000001 /* ArchiveModeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00122F30001100000001 /* ArchiveModeView.swift */; };
-		2F6A00152F30001100000001 /* ArchiveModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00142F30001100000001 /* ArchiveModeTests.swift */; };
-		2F6A00072F30000000000005 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 2F6A00062F30000000000005 /* GRDB */; };
 		2F162E802F1E7B30001FBAFF /* PasteStackPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F162E7F2F1E7B28001FBAFF /* PasteStackPreviewView.swift */; };
 		2F1A79C02C6DFB7800C98EBD /* SearchVisibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F1A79BF2C6DFB7800C98EBD /* SearchVisibility.swift */; };
 		2F39CB042AD9A93C00B749FD /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 2F39CB032AD9A93C00B749FD /* Sparkle */; };
@@ -32,6 +26,12 @@
 		2F578C3F2EFFE8720088B759 /* SlideoutController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F578C3E2EFFE8720088B759 /* SlideoutController.swift */; };
 		2F578C422EFFE8920088B759 /* SlideoutContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F578C402EFFE8920088B759 /* SlideoutContentView.swift */; };
 		2F578C432EFFE8920088B759 /* SlideoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F578C412EFFE8920088B759 /* SlideoutView.swift */; };
+		2F6A00022F30000000000005 /* ArchiveDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00012F30000000000005 /* ArchiveDatabase.swift */; };
+		2F6A00042F30000000000005 /* ArchiveDatabaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00032F30000000000005 /* ArchiveDatabaseTests.swift */; };
+		2F6A00072F30000000000005 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 2F6A00062F30000000000005 /* GRDB */; };
+		2F6A00112F30001100000001 /* ArchiveMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00102F30001100000001 /* ArchiveMode.swift */; };
+		2F6A00132F30001100000001 /* ArchiveModeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00122F30001100000001 /* ArchiveModeView.swift */; };
+		2F6A00152F30001100000001 /* ArchiveModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00142F30001100000001 /* ArchiveModeTests.swift */; };
 		2F8B9DE62C5D6E5D0046EF69 /* NSPoint+DefaultsSerializable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F8B9DE52C5D6E5D0046EF69 /* NSPoint+DefaultsSerializable.swift */; };
 		2F9B42EF2F1A494C006548E5 /* ListHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F9B42EE2F1A4948006548E5 /* ListHeaderView.swift */; };
 		2F9B42F12F1A499D006548E5 /* ToolbarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F9B42F02F1A4999006548E5 /* ToolbarView.swift */; };
@@ -202,13 +202,13 @@
 		2F1A79BF2C6DFB7800C98EBD /* SearchVisibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchVisibility.swift; sourceTree = "<group>"; };
 		2F578C3C2EFFE8400088B759 /* ItemsProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ItemsProtocol.swift; sourceTree = "<group>"; };
 		2F578C3E2EFFE8720088B759 /* SlideoutController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideoutController.swift; sourceTree = "<group>"; };
+		2F578C402EFFE8920088B759 /* SlideoutContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideoutContentView.swift; sourceTree = "<group>"; };
+		2F578C412EFFE8920088B759 /* SlideoutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideoutView.swift; sourceTree = "<group>"; };
 		2F6A00012F30000000000005 /* ArchiveDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveDatabase.swift; sourceTree = "<group>"; };
 		2F6A00032F30000000000005 /* ArchiveDatabaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveDatabaseTests.swift; sourceTree = "<group>"; };
 		2F6A00102F30001100000001 /* ArchiveMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveMode.swift; sourceTree = "<group>"; };
 		2F6A00122F30001100000001 /* ArchiveModeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveModeView.swift; sourceTree = "<group>"; };
 		2F6A00142F30001100000001 /* ArchiveModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveModeTests.swift; sourceTree = "<group>"; };
-		2F578C402EFFE8920088B759 /* SlideoutContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideoutContentView.swift; sourceTree = "<group>"; };
-		2F578C412EFFE8920088B759 /* SlideoutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideoutView.swift; sourceTree = "<group>"; };
 		2F8B9DE52C5D6E5D0046EF69 /* NSPoint+DefaultsSerializable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NSPoint+DefaultsSerializable.swift"; sourceTree = "<group>"; };
 		2F9B42EE2F1A4948006548E5 /* ListHeaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListHeaderView.swift; sourceTree = "<group>"; };
 		2F9B42F02F1A4999006548E5 /* ToolbarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolbarView.swift; sourceTree = "<group>"; };
@@ -216,7 +216,6 @@
 		2FB5BC9F2CD8F73C008B33F4 /* ApplicationImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationImage.swift; sourceTree = "<group>"; };
 		2FF2E94D2E774B570093D72C /* NavigationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationManager.swift; sourceTree = "<group>"; };
 		2FF2E94F2E7808420093D72C /* AppImageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppImageView.swift; sourceTree = "<group>"; };
-		2FFF8BCF2CE2116600235A78 /* Data+Encoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Data+Encoding.swift"; sourceTree = "<group>"; };
 		3EBDD1E32BBEF22800C57500 /* nl */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = nl; path = nl.lproj/Localizable.strings; sourceTree = "<group>"; };
 		4762D6982467226100B3A2BA /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		4762D69A2467226400B3A2BA /* es */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = es; path = es.lproj/Localizable.strings; sourceTree = "<group>"; };
@@ -948,7 +947,6 @@
 				TargetAttributes = {
 					DA0EE7B5204657830025FC60 = {
 						CreatedOnToolsVersion = 9.2;
-						DevelopmentTeam = MN3X4648SC;
 						LastSwiftMigration = 1020;
 						ProvisioningStyle = Automatic;
 						TestTargetID = DAEE38421E3DBEB100DD2966;
@@ -1005,7 +1003,7 @@
 			);
 			mainGroup = DAEE383A1E3DBEB100DD2966;
 			packageReferences = (
-				2F6A00052F30000000000005 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
+				2F6A00052F30000000000005 /* XCRemoteSwiftPackageReference "GRDB" */,
 				DA5154D62564102900C01004 /* XCRemoteSwiftPackageReference "Sauce" */,
 				DA009945256414800030E697 /* XCRemoteSwiftPackageReference "SwiftHEXColors" */,
 				DA009953256414E60030E697 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */,
@@ -1540,7 +1538,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = MN3X4648SC;
+				DEVELOPMENT_TEAM = 8SWVUGWCDC;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				INFOPLIST_FILE = MaccyUITests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1567,7 +1565,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = MN3X4648SC;
+				DEVELOPMENT_TEAM = 8SWVUGWCDC;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				INFOPLIST_FILE = MaccyUITests/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1886,6 +1884,14 @@
 				minimumVersion = 3.1.1;
 			};
 		};
+		2F6A00052F30000000000005 /* XCRemoteSwiftPackageReference "GRDB" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 6.27.0;
+			};
+		};
 		DA009945256414800030E697 /* XCRemoteSwiftPackageReference "SwiftHEXColors" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/thii/SwiftHEXColors";
@@ -1934,14 +1940,6 @@
 				minimumVersion = 1.4.0;
 			};
 		};
-		2F6A00052F30000000000005 /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/groue/GRDB.swift";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 6.27.0;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -1962,7 +1960,7 @@
 		};
 		2F6A00062F30000000000005 /* GRDB */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 2F6A00052F30000000000005 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			package = 2F6A00052F30000000000005 /* XCRemoteSwiftPackageReference "GRDB" */;
 			productName = GRDB;
 		};
 		DA009946256414800030E697 /* SwiftHEXColors */ = {
