@@ -1,10 +1,16 @@
 import AppKit
+import Defaults
 import Foundation
 import XCTest
 @testable import Maccy
 
 final class ArchiveDatabaseTests: XCTestCase {
   private var tempDirectory: URL!
+  private let savedEnabledPasteboardTypes = Defaults[.enabledPasteboardTypes]
+  private let savedIgnoreAllAppsExceptListed = Defaults[.ignoreAllAppsExceptListed]
+  private let savedIgnoredApps = Defaults[.ignoredApps]
+  private let savedIgnoredPasteboardTypes = Defaults[.ignoredPasteboardTypes]
+  private let savedIgnoreRegexp = Defaults[.ignoreRegexp]
 
   override func setUpWithError() throws {
     try super.setUpWithError()
@@ -19,6 +25,11 @@ final class ArchiveDatabaseTests: XCTestCase {
       try? FileManager.default.removeItem(at: tempDirectory)
     }
     tempDirectory = nil
+    Defaults[.enabledPasteboardTypes] = savedEnabledPasteboardTypes
+    Defaults[.ignoreAllAppsExceptListed] = savedIgnoreAllAppsExceptListed
+    Defaults[.ignoredApps] = savedIgnoredApps
+    Defaults[.ignoredPasteboardTypes] = savedIgnoredPasteboardTypes
+    Defaults[.ignoreRegexp] = savedIgnoreRegexp
     try super.tearDownWithError()
   }
 
@@ -736,6 +747,99 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertEqual(representation(.png, in: archivedItem)?.value, imageData)
     XCTAssertEqual(representation(.fileURL, in: archivedItem)?.value, fileURLData)
     XCTAssertTrue(archivedItem.representations.allSatisfy { $0.payloadHash != nil })
+  }
+
+  @MainActor
+  func testImportSkipsLegacyItemsWithPrivacyPasteboardMarkers() throws {
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let markerItems = NSPasteboard.PasteboardType.privacyMarkerTypes.enumerated().map { index, type in
+      historyItem(
+        title: "Ignored marker \(index)",
+        contents: [
+          content(.string, Data("secret \(index)".utf8)),
+          content(type, Data()),
+        ]
+      )
+    }
+    let keptItem = historyItem(title: "Kept", contents: [content(.string, Data("kept".utf8))])
+
+    let report = try database.importLegacyHistoryItems(markerItems + [keptItem])
+    let snapshot = try database.archiveSnapshot()
+
+    XCTAssertEqual(report.itemsSeen, 4)
+    XCTAssertEqual(report.itemsImported, 1)
+    XCTAssertEqual(report.representationsSeen, 7)
+    XCTAssertEqual(report.representationsImported, 1)
+    XCTAssertEqual(report.errorCount, 0)
+    XCTAssertEqual(itemTitles(snapshot.items), ["Kept"])
+    XCTAssertTrue(snapshot.items.flatMap(\.representations).allSatisfy { representation in
+      !NSPasteboard.PasteboardType.privacyMarkerTypes.contains(NSPasteboard.PasteboardType(representation.type))
+    })
+  }
+
+  @MainActor
+  func testImportSkipsLegacyItemsFromIgnoredApplications() throws {
+    Defaults[.ignoredApps] = ["com.example.SecretApp"]
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let ignoredItem = historyItem(title: "Secret", contents: [content(.string, Data("secret".utf8))])
+    ignoredItem.application = "com.example.SecretApp"
+    let keptItem = historyItem(title: "Kept", contents: [content(.string, Data("kept".utf8))])
+    keptItem.application = "com.example.Editor"
+
+    let report = try database.importLegacyHistoryItems([ignoredItem, keptItem])
+    let snapshot = try database.archiveSnapshot()
+
+    XCTAssertEqual(report.itemsSeen, 2)
+    XCTAssertEqual(report.itemsImported, 1)
+    XCTAssertEqual(report.representationsSeen, 2)
+    XCTAssertEqual(report.representationsImported, 1)
+    XCTAssertEqual(itemTitles(snapshot.items), ["Kept"])
+  }
+
+  @MainActor
+  func testImportSkipsLegacyItemsWithIgnoredPasteboardTypes() throws {
+    let ignoredType = NSPasteboard.PasteboardType(rawValue: "org.maccy.SecretType")
+    Defaults[.ignoredPasteboardTypes] = [ignoredType.rawValue]
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let ignoredItem = historyItem(
+      title: "Ignored type",
+      contents: [
+        content(.string, Data("secret".utf8)),
+        content(ignoredType, Data("marker".utf8)),
+      ]
+    )
+    let keptItem = historyItem(title: "Kept", contents: [content(.string, Data("kept".utf8))])
+
+    let report = try database.importLegacyHistoryItems([ignoredItem, keptItem])
+    let snapshot = try database.archiveSnapshot()
+
+    XCTAssertEqual(report.itemsSeen, 2)
+    XCTAssertEqual(report.itemsImported, 1)
+    XCTAssertEqual(report.representationsSeen, 3)
+    XCTAssertEqual(report.representationsImported, 1)
+    XCTAssertEqual(itemTitles(snapshot.items), ["Kept"])
+  }
+
+  @MainActor
+  func testImportDropsDisabledRepresentationsBeforeArchiving() throws {
+    Defaults[.enabledPasteboardTypes] = [.string]
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+    let item = historyItem(
+      title: "Mixed",
+      contents: [
+        content(.string, Data("kept".utf8)),
+        content(.png, Data("image".utf8)),
+      ]
+    )
+
+    let report = try database.importLegacyHistoryItems([item])
+    let archivedItem = try XCTUnwrap(database.archiveSnapshot().items.first)
+
+    XCTAssertEqual(report.itemsImported, 1)
+    XCTAssertEqual(report.representationsSeen, 2)
+    XCTAssertEqual(report.representationsImported, 1)
+    XCTAssertEqual(archivedItem.representations.map(\.type), [NSPasteboard.PasteboardType.string.rawValue])
+    XCTAssertEqual(archivedItem.searchText, "kept")
   }
 
   @MainActor

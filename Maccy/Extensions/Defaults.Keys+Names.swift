@@ -1,6 +1,20 @@
 import AppKit
 import Defaults
 
+private let defaultIgnoredApps = [
+  "com.1password.1password",
+  "com.agilebits.onepassword",
+  "com.agilebits.onepassword7",
+  "com.bitwarden.desktop",
+  "com.dashlane.dashlanephonefinal",
+  "com.lastpass.LastPass",
+  "org.keepassxc.keepassxc",
+  "com.keepassx.keepassx",
+  "in.sinew.Enpass-Desktop",
+  "com.markmcguill.strongbox",
+  "com.strongboxsafe.strongbox",
+]
+
 struct StorageType {
   static let files = StorageType(types: [.fileURL])
   static let images = StorageType(types: [.png, .tiff])
@@ -22,7 +36,7 @@ extension Defaults.Keys {
   static let ignoreEvents = Key<Bool>("ignoreEvents", default: false)
   static let ignoreOnlyNextEvent = Key<Bool>("ignoreOnlyNextEvent", default: false)
   static let ignoreRegexp = Key<[String]>("ignoreRegexp", default: [])
-  static let ignoredApps = Key<[String]>("ignoredApps", default: [])
+  static let ignoredApps = Key<[String]>("ignoredApps", default: defaultIgnoredApps)
   static let ignoredPasteboardTypes = Key<Set<String>>(
     "ignoredPasteboardTypes",
     default: Set([
@@ -34,6 +48,7 @@ extension Defaults.Keys {
     ])
   )
   static let imageMaxHeight = Key<Int>("imageMaxHeight", default: 40)
+  static let recognizeTextInImages = Key<Bool>("recognizeTextInImages", default: false)
   static let archiveInlinePayloadThresholdBytes = Key<Int>(
     "archiveInlinePayloadThresholdBytes",
     default: 128 * 1024
