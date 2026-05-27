@@ -104,7 +104,11 @@ class FloatingPanel<Content: View>: NSPanel, NSWindowDelegate {
 
     let size = Defaults[.windowSize]
     let contentSize = NSSize(width: min(size.width, visibleFrame.width), height: min(height, size.height))
-    return Defaults[.sidebarPosition].frame(contentSize: contentSize, visibleFrame: visibleFrame)
+    return Defaults[.sidebarPosition].frame(
+      contentSize: contentSize,
+      visibleFrame: visibleFrame,
+      size: Defaults[.sidebarSize]
+    )
   }
 
   func verticallyResize(to newHeight: CGFloat) {
@@ -149,7 +153,7 @@ class FloatingPanel<Content: View>: NSPanel, NSWindowDelegate {
   func saveWindowFrame(frame: NSRect) {
     var size = frame.size
 
-    if Defaults[.popupDisplayMode] == .sidebar {
+    if Defaults[.popupDisplayMode] == .sidebar && Defaults[.sidebarSize] == .fillAvailableSpace {
       let savedSize = Defaults[.windowSize]
       switch Defaults[.sidebarPosition] {
       case .left, .right:

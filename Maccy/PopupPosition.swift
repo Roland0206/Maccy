@@ -39,20 +39,39 @@ enum SidebarPosition: String, CaseIterable, Identifiable, CustomStringConvertibl
     }
   }
 
-  func frame(contentSize: NSSize, visibleFrame: NSRect) -> NSRect {
+  func frame(contentSize: NSSize, visibleFrame: NSRect, size: SidebarSize) -> NSRect {
+    let width = min(contentSize.width, visibleFrame.width)
+    let height = min(contentSize.height, visibleFrame.height)
+
     switch self {
     case .left:
-      let width = min(contentSize.width, visibleFrame.width)
-      return NSRect(x: visibleFrame.minX, y: visibleFrame.minY, width: width, height: visibleFrame.height)
+      let frameHeight = size == .fillAvailableSpace ? visibleFrame.height : height
+      return NSRect(x: visibleFrame.minX, y: visibleFrame.minY, width: width, height: frameHeight)
     case .right:
-      let width = min(contentSize.width, visibleFrame.width)
-      return NSRect(x: visibleFrame.maxX - width, y: visibleFrame.minY, width: width, height: visibleFrame.height)
+      let frameHeight = size == .fillAvailableSpace ? visibleFrame.height : height
+      return NSRect(x: visibleFrame.maxX - width, y: visibleFrame.minY, width: width, height: frameHeight)
     case .top:
-      let height = min(contentSize.height, visibleFrame.height)
-      return NSRect(x: visibleFrame.minX, y: visibleFrame.maxY - height, width: visibleFrame.width, height: height)
+      let frameWidth = size == .fillAvailableSpace ? visibleFrame.width : width
+      return NSRect(x: visibleFrame.minX, y: visibleFrame.maxY - height, width: frameWidth, height: height)
     case .bottom:
-      let height = min(contentSize.height, visibleFrame.height)
-      return NSRect(x: visibleFrame.minX, y: visibleFrame.minY, width: visibleFrame.width, height: height)
+      let frameWidth = size == .fillAvailableSpace ? visibleFrame.width : width
+      return NSRect(x: visibleFrame.minX, y: visibleFrame.minY, width: frameWidth, height: height)
+    }
+  }
+}
+
+enum SidebarSize: String, CaseIterable, Identifiable, CustomStringConvertible, Defaults.Serializable {
+  case fitContent
+  case fillAvailableSpace
+
+  var id: Self { self }
+
+  var description: String {
+    switch self {
+    case .fitContent:
+      return NSLocalizedString("SidebarSizeFitContent", tableName: "AppearanceSettings", comment: "")
+    case .fillAvailableSpace:
+      return NSLocalizedString("SidebarSizeFillAvailableSpace", tableName: "AppearanceSettings", comment: "")
     }
   }
 }

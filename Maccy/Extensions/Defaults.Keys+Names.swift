@@ -99,6 +99,7 @@ extension Defaults.Keys {
   static let showRecentCopyInMenuBar = Key<Bool>("showRecentCopyInMenuBar", default: false)
   static let showSearch = Key<Bool>("showSearch", default: true)
   static let sidebarPosition = Key<SidebarPosition>("sidebarPosition", default: .left)
+  static let sidebarSize = Key<SidebarSize>("sidebarSize", default: .fitContent)
   static let searchVisibility = Key<SearchVisibility>("searchVisibility", default: .always)
   static let showSpecialSymbols = Key<Bool>("showSpecialSymbols", default: true)
   static let showTitle = Key<Bool>("showTitle", default: true)

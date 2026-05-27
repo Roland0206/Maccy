@@ -8,6 +8,7 @@ struct AppearanceSettingsPane: View {
   @Default(.popupPosition) private var popupAt
   @Default(.popupScreen) private var popupScreen
   @Default(.sidebarPosition) private var sidebarPosition
+  @Default(.sidebarSize) private var sidebarSize
   @Default(.pinTo) private var pinTo
   @Default(.imageMaxHeight) private var imageHeight
   @Default(.previewDelay) private var previewDelay
@@ -73,6 +74,18 @@ struct AppearanceSettingsPane: View {
         .labelsHidden()
         .frame(width: 141, alignment: .leading)
         .help(Text("SidebarPositionTooltip", tableName: "AppearanceSettings"))
+        .disabled(popupDisplayMode != .sidebar)
+      }
+
+      Settings.Section(label: { Text("SidebarSize", tableName: "AppearanceSettings") }) {
+        Picker("", selection: $sidebarSize) {
+          ForEach(SidebarSize.allCases) { size in
+            Text(size.description)
+          }
+        }
+        .labelsHidden()
+        .frame(width: 141, alignment: .leading)
+        .help(Text("SidebarSizeTooltip", tableName: "AppearanceSettings"))
         .disabled(popupDisplayMode != .sidebar)
       }
 
