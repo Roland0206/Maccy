@@ -104,6 +104,175 @@ struct ArchiveSnapshot: Equatable {
   var searchDocumentCount: Int { items.filter { $0.searchTitle != nil || $0.searchText != nil }.count }
 }
 
+struct ArchiveMaintenanceReport: Equatable {
+  var expiredRepresentationsDeleted = 0
+  var countLimitedItemsSoftDeleted = 0
+  var expiredItemsSoftDeleted = 0
+  var tombstonedItemsPhysicallyDeleted = 0
+  var externalPayloadsDeleted: [ArchivePayloadFile] = []
+  var incrementalVacuumPagesRequested = 0
+
+  var didChangeArchive: Bool {
+    expiredRepresentationsDeleted > 0 ||
+      countLimitedItemsSoftDeleted > 0 ||
+      expiredItemsSoftDeleted > 0 ||
+      tombstonedItemsPhysicallyDeleted > 0 ||
+      !externalPayloadsDeleted.isEmpty
+  }
+}
+
+struct ArchiveTombstoneSnapshot: Equatable, FetchableRecord {
+  let entityKind: String
+  let entityID: String
+  let reason: String?
+  let createdAt: String
+
+  init(row: Row) throws {
+    entityKind = row["entity_kind"]
+    entityID = row["entity_id"]
+    reason = row["reason"]
+    createdAt = row["created_at"]
+  }
+}
+
+enum ArchiveRetentionPolicy: String, CaseIterable, Identifiable, CustomStringConvertible, Defaults.Serializable {
+  case sevenDays
+  case thirtyDays
+  case oneYear
+  case forever
+
+  var id: Self { self }
+
+  var description: String {
+    switch self {
+    case .sevenDays:
+      return "7 days"
+    case .thirtyDays:
+      return "30 days"
+    case .oneYear:
+      return "1 year"
+    case .forever:
+      return "Forever"
+    }
+  }
+
+  func cutoffDate(now: Date) -> Date? {
+    switch self {
+    case .sevenDays:
+      return Calendar.current.date(byAdding: .day, value: -7, to: now)
+    case .thirtyDays:
+      return Calendar.current.date(byAdding: .day, value: -30, to: now)
+    case .oneYear:
+      return Calendar.current.date(byAdding: .year, value: -1, to: now)
+    case .forever:
+      return nil
+    }
+  }
+}
+
+enum ArchiveRetentionContentCategory: String, CaseIterable, Identifiable {
+  case plainText
+  case richTextAndWebContent
+  case images
+  case files
+  case otherUnknownBinary
+
+  var id: Self { self }
+
+  var label: String {
+    switch self {
+    case .plainText:
+      return "Plain text"
+    case .richTextAndWebContent:
+      return "Rich text & web content"
+    case .images:
+      return "Images"
+    case .files:
+      return "Files"
+    case .otherUnknownBinary:
+      return "Other / unknown binary"
+    }
+  }
+
+  static func category(forPasteboardType type: String) -> ArchiveRetentionContentCategory {
+    switch NSPasteboard.PasteboardType(type) {
+    case .string:
+      return .plainText
+    case .rtf, .html:
+      return .richTextAndWebContent
+    case .png, .tiff, .jpeg, .heic:
+      return .images
+    case .fileURL:
+      return .files
+    default:
+      return .otherUnknownBinary
+    }
+  }
+}
+
+struct ArchiveRetentionConfiguration: Equatable {
+  var plainText: ArchiveRetentionPolicy
+  var richTextAndWebContent: ArchiveRetentionPolicy
+  var images: ArchiveRetentionPolicy
+  var files: ArchiveRetentionPolicy
+  var otherUnknownBinary: ArchiveRetentionPolicy
+  var tombstones: ArchiveRetentionPolicy
+  var maximumItemCount: Int?
+  var vacuumPageCount: Int
+
+  init(
+    plainText: ArchiveRetentionPolicy = .forever,
+    richTextAndWebContent: ArchiveRetentionPolicy = .thirtyDays,
+    images: ArchiveRetentionPolicy = .sevenDays,
+    files: ArchiveRetentionPolicy = .thirtyDays,
+    otherUnknownBinary: ArchiveRetentionPolicy = .sevenDays,
+    tombstones: ArchiveRetentionPolicy = .thirtyDays,
+    maximumItemCount: Int? = nil,
+    vacuumPageCount: Int = 16
+  ) {
+    self.plainText = plainText
+    self.richTextAndWebContent = richTextAndWebContent
+    self.images = images
+    self.files = files
+    self.otherUnknownBinary = otherUnknownBinary
+    self.tombstones = tombstones
+    self.maximumItemCount = maximumItemCount
+    self.vacuumPageCount = vacuumPageCount
+  }
+
+  static var defaults: ArchiveRetentionConfiguration {
+    ArchiveRetentionConfiguration(
+      plainText: Defaults[.archivePlainTextRetention],
+      richTextAndWebContent: Defaults[.archiveRichTextAndWebContentRetention],
+      images: Defaults[.archiveImageRetention],
+      files: Defaults[.archiveFileRetention],
+      otherUnknownBinary: Defaults[.archiveOtherUnknownBinaryRetention],
+      tombstones: Defaults[.archiveTombstoneRetention],
+      maximumItemCount: Defaults[.archiveMaximumItemCount] > 0 ? Defaults[.archiveMaximumItemCount] : nil,
+      vacuumPageCount: Defaults[.archiveIncrementalVacuumPageCount]
+    )
+  }
+
+  func policy(for category: ArchiveRetentionContentCategory) -> ArchiveRetentionPolicy {
+    switch category {
+    case .plainText:
+      return plainText
+    case .richTextAndWebContent:
+      return richTextAndWebContent
+    case .images:
+      return images
+    case .files:
+      return files
+    case .otherUnknownBinary:
+      return otherUnknownBinary
+    }
+  }
+
+  func policy(forPasteboardType type: String) -> ArchiveRetentionPolicy {
+    policy(for: ArchiveRetentionContentCategory.category(forPasteboardType: type))
+  }
+}
+
 struct ArchiveItemSnapshot: Equatable, FetchableRecord {
   let id: Int64
   let sourceAppBundleIdentifier: String?
@@ -348,6 +517,20 @@ private struct SearchDocumentRow: FetchableRecord {
     itemID = row["item_id"]
     title = row["title"]
     text = row["text"]
+  }
+}
+
+private struct RetentionRepresentationRow: FetchableRecord {
+  let representationID: Int64
+  let itemID: Int64
+  let type: String
+  let lastSeenAt: String
+
+  init(row: Row) throws {
+    representationID = row["representation_id"]
+    itemID = row["item_id"]
+    type = row["type"]
+    lastSeenAt = row["last_seen_at"]
   }
 }
 
@@ -599,12 +782,178 @@ final class ArchiveDatabase {
     return orphans
   }
 
+  func tombstones() throws -> [ArchiveTombstoneSnapshot] {
+    try pool.read { db in
+      try ArchiveTombstoneSnapshot.fetchAll(
+        db,
+        sql: "SELECT entity_kind, entity_id, reason, created_at FROM tombstones ORDER BY id"
+      )
+    }
+  }
+
   @discardableResult
   func deleteItemPermanently(id: Int64) throws -> [ArchivePayloadFile] {
     try pool.write { db in
       try db.execute(sql: "DELETE FROM clipboard_items WHERE id = ?", arguments: [id])
+      try db.execute(
+        sql: "DELETE FROM tombstones WHERE entity_kind = ? AND entity_id = ?",
+        arguments: [Self.clipboardItemTombstoneKind, String(id)]
+      )
     }
     return try cleanupOrphanedExternalPayloadFiles()
+  }
+
+  func performRetentionMaintenance(
+    configuration: ArchiveRetentionConfiguration = .defaults,
+    now: Date = Date(),
+    batchLimit: Int = Defaults[.archiveMaintenanceBatchLimit]
+  ) throws -> ArchiveMaintenanceReport {
+    let limit = max(batchLimit, 0)
+    guard limit > 0 else { return ArchiveMaintenanceReport() }
+
+    var report = try expireRepresentations(
+      configuration: configuration,
+      now: now,
+      batchLimit: limit
+    )
+    report.countLimitedItemsSoftDeleted = try softDeleteItemsOverMaximumCount(
+      configuration.maximumItemCount,
+      now: now,
+      batchLimit: limit
+    )
+    report.tombstonedItemsPhysicallyDeleted = try deleteExpiredTombstonedItems(
+      configuration: configuration,
+      now: now,
+      batchLimit: limit
+    )
+    report.externalPayloadsDeleted = try cleanupOrphanedExternalPayloadFiles()
+    if configuration.vacuumPageCount > 0 {
+      try runIncrementalStorageMaintenance(pageCount: configuration.vacuumPageCount)
+      report.incrementalVacuumPagesRequested = configuration.vacuumPageCount
+    }
+    return report
+  }
+
+  private func expireRepresentations(
+    configuration: ArchiveRetentionConfiguration,
+    now: Date,
+    batchLimit: Int
+  ) throws -> ArchiveMaintenanceReport {
+    let candidates = try expiredRepresentationCandidates(
+      configuration: configuration,
+      now: now,
+      batchLimit: batchLimit
+    )
+    let expiredRepresentationIDs = candidates.map(\.representationID)
+    guard !expiredRepresentationIDs.isEmpty else { return ArchiveMaintenanceReport() }
+
+    let affectedItemIDs = Set(candidates
+      .filter { expiredRepresentationIDs.contains($0.representationID) }
+      .map(\.itemID))
+    let itemIDsWithNoRepresentations = try pool.write { db -> [Int64] in
+      try Self.deleteRows(
+        from: "clipboard_representations",
+        column: "id",
+        values: expiredRepresentationIDs,
+        db: db
+      )
+      return try Self.itemIDsWithoutRepresentations(Array(affectedItemIDs), db: db)
+    }
+
+    let softDeletedCount = try softDeleteItems(
+      itemIDsWithNoRepresentations,
+      reason: Self.retentionExpiredTombstoneReason,
+      now: now
+    )
+
+    return ArchiveMaintenanceReport(
+      expiredRepresentationsDeleted: expiredRepresentationIDs.count,
+      expiredItemsSoftDeleted: softDeletedCount
+    )
+  }
+
+  private func expiredRepresentationCandidates(
+    configuration: ArchiveRetentionConfiguration,
+    now: Date,
+    batchLimit: Int
+  ) throws -> [RetentionRepresentationRow] {
+    var candidates: [RetentionRepresentationRow] = []
+
+    for category in ArchiveRetentionContentCategory.allCases where candidates.count < batchLimit {
+      guard let cutoff = configuration.policy(for: category).cutoffDate(now: now) else { continue }
+      let remainingLimit = batchLimit - candidates.count
+      candidates += try pool.read { db in
+        try RetentionRepresentationRow.fetchAll(
+          db,
+          sql: Self.retentionRepresentationCandidatesSQL(typePredicate: Self.retentionTypePredicate(for: category)),
+          arguments: Self.retentionRepresentationCandidateArguments(
+            category: category,
+            cutoff: Self.archiveTimestamp(cutoff),
+            limit: remainingLimit
+          )
+        )
+      }
+    }
+
+    return candidates
+  }
+
+  private func softDeleteItemsOverMaximumCount(
+    _ maximumItemCount: Int?,
+    now: Date,
+    batchLimit: Int
+  ) throws -> Int {
+    guard let maximumItemCount, maximumItemCount >= 0 else { return 0 }
+
+    let ids = try pool.read { db in
+      try Int64.fetchAll(
+        db,
+        sql: Self.itemsOverMaximumCountSQL,
+        arguments: [maximumItemCount, batchLimit]
+      )
+    }
+    return try softDeleteItems(ids, reason: Self.countLimitTombstoneReason, now: now)
+  }
+
+  private func deleteExpiredTombstonedItems(
+    configuration: ArchiveRetentionConfiguration,
+    now: Date,
+    batchLimit: Int
+  ) throws -> Int {
+    guard let cutoff = configuration.tombstones.cutoffDate(now: now) else { return 0 }
+    let cutoffTimestamp = Self.archiveTimestamp(cutoff)
+
+    let ids = try pool.read { db in
+      try Int64.fetchAll(
+        db,
+        sql: Self.expiredTombstonedItemsSQL,
+        arguments: [cutoffTimestamp, batchLimit]
+      )
+    }
+    guard !ids.isEmpty else { return 0 }
+
+    try pool.write { db in
+      try Self.deleteRows(from: "clipboard_items", column: "id", values: ids, db: db)
+      try Self.deleteTombstones(for: ids, db: db)
+    }
+    return ids.count
+  }
+
+  private func softDeleteItems(_ ids: [Int64], reason: String, now: Date) throws -> Int {
+    guard !ids.isEmpty else { return 0 }
+    let timestamp = Self.archiveTimestamp(now)
+
+    try pool.write { db in
+      try Self.softDeleteItems(ids, reason: reason, timestamp: timestamp, db: db)
+    }
+    return ids.count
+  }
+
+  private func runIncrementalStorageMaintenance(pageCount: Int) throws {
+    try pool.writeWithoutTransaction { db in
+      try db.execute(sql: "PRAGMA wal_checkpoint(PASSIVE)")
+      try db.execute(sql: "PRAGMA incremental_vacuum(\(max(pageCount, 0)))")
+    }
   }
 
   private func referencedExternalPayloadRelativePaths() throws -> Set<String> {
@@ -676,40 +1025,35 @@ final class ArchiveDatabase {
 
   func softDeleteItem(id: Int64, at deletedAt: Date = Date()) throws {
     try pool.write { db in
-      try db.execute(
-        sql: "UPDATE clipboard_items SET deleted_at = ? WHERE id = ?",
-        arguments: [Self.archiveTimestamp(deletedAt), id]
+      try Self.softDeleteItems(
+        [id],
+        reason: Self.userDeletedTombstoneReason,
+        timestamp: Self.archiveTimestamp(deletedAt),
+        db: db
       )
     }
   }
 
   func softDeleteUnpinnedItems(at deletedAt: Date = Date()) throws {
     try pool.write { db in
-      try db.execute(
-        sql: """
-          UPDATE clipboard_items
-          SET deleted_at = ?
-          WHERE deleted_at IS NULL
-            AND NOT EXISTS (
-              SELECT 1
-              FROM pins
-              WHERE pins.item_id = clipboard_items.id
-            )
-        """,
-        arguments: [Self.archiveTimestamp(deletedAt)]
+      let ids = try Int64.fetchAll(db, sql: Self.unpinnedItemIDsSQL)
+      try Self.softDeleteItems(
+        ids,
+        reason: Self.userDeletedTombstoneReason,
+        timestamp: Self.archiveTimestamp(deletedAt),
+        db: db
       )
     }
   }
 
   func softDeleteAllItems(at deletedAt: Date = Date()) throws {
     try pool.write { db in
-      try db.execute(
-        sql: """
-          UPDATE clipboard_items
-          SET deleted_at = ?
-          WHERE deleted_at IS NULL
-        """,
-        arguments: [Self.archiveTimestamp(deletedAt)]
+      let ids = try Int64.fetchAll(db, sql: Self.allVisibleItemIDsSQL)
+      try Self.softDeleteItems(
+        ids,
+        reason: Self.userDeletedTombstoneReason,
+        timestamp: Self.archiveTimestamp(deletedAt),
+        db: db
       )
     }
   }
@@ -1195,6 +1539,125 @@ final class ArchiveDatabase {
     )
   }
 
+  private static func softDeleteItems(
+    _ ids: [Int64],
+    reason: String,
+    timestamp: String,
+    db: Database
+  ) throws {
+    guard !ids.isEmpty else { return }
+    try updateRows(
+      table: "clipboard_items",
+      assignment: "deleted_at = ?",
+      column: "id",
+      values: ids,
+      leadingArguments: [timestamp],
+      extraPredicate: "deleted_at IS NULL",
+      db: db
+    )
+    for id in ids {
+      try upsertTombstone(
+        entityKind: clipboardItemTombstoneKind,
+        entityID: String(id),
+        reason: reason,
+        timestamp: timestamp,
+        db: db
+      )
+    }
+  }
+
+  private static func itemIDsWithoutRepresentations(_ ids: [Int64], db: Database) throws -> [Int64] {
+    guard !ids.isEmpty else { return [] }
+    return try Int64.fetchAll(
+      db,
+      sql: """
+        SELECT clipboard_items.id
+        FROM clipboard_items
+        WHERE clipboard_items.id IN (\(placeholders(count: ids.count)))
+          AND clipboard_items.deleted_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM clipboard_representations
+            WHERE clipboard_representations.item_id = clipboard_items.id
+          )
+        """,
+      arguments: StatementArguments(ids)
+    )
+  }
+
+  private static func deleteRows(
+    from table: String,
+    column: String,
+    values: [Int64],
+    db: Database
+  ) throws {
+    guard !values.isEmpty else { return }
+    try db.execute(
+      sql: "DELETE FROM \(table) WHERE \(column) IN (\(placeholders(count: values.count)))",
+      arguments: StatementArguments(values)
+    )
+  }
+
+  private static func updateRows(
+    table: String,
+    assignment: String,
+    column: String,
+    values: [Int64],
+    leadingArguments: StatementArguments = [],
+    extraPredicate: String? = nil,
+    db: Database
+  ) throws {
+    guard !values.isEmpty else { return }
+    let extraPredicateSQL = extraPredicate.map { " AND \($0)" } ?? ""
+    var arguments = leadingArguments
+    arguments += StatementArguments(values)
+    try db.execute(
+      sql: """
+        UPDATE \(table)
+        SET \(assignment)
+        WHERE \(column) IN (\(placeholders(count: values.count)))\(extraPredicateSQL)
+        """,
+      arguments: arguments
+    )
+  }
+
+  private static func deleteTombstones(for ids: [Int64], db: Database) throws {
+    guard !ids.isEmpty else { return }
+    var arguments: StatementArguments = [clipboardItemTombstoneKind]
+    arguments += StatementArguments(ids.map(String.init))
+    try db.execute(
+      sql: """
+        DELETE FROM tombstones
+        WHERE entity_kind = ?
+          AND entity_id IN (\(placeholders(count: ids.count)))
+        """,
+      arguments: arguments
+    )
+  }
+
+  private static func upsertTombstone(
+    entityKind: String,
+    entityID: String,
+    reason: String,
+    timestamp: String,
+    db: Database
+  ) throws {
+    try db.execute(
+      sql: """
+        INSERT INTO tombstones (entity_kind, entity_id, reason, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(entity_kind, entity_id) DO UPDATE SET
+          reason = excluded.reason,
+          created_at = excluded.created_at
+        """,
+      arguments: [entityKind, entityID, reason, timestamp]
+    )
+  }
+
+  private static func placeholders(count: Int) -> String {
+    Array(repeating: "?", count: count).joined(separator: ", ")
+  }
+
   private static func checkFTS5Availability(_ db: Database) -> Bool {
     do {
       try db.execute(sql: "CREATE VIRTUAL TABLE temp.__maccy_fts5_smoke USING fts5(content)")
@@ -1334,7 +1797,14 @@ enum ArchiveDatabaseBootstrap {
     }
 
     do {
-      _ = try sharedDatabase()
+      let database = try sharedDatabase()
+      Task.detached(priority: .background) {
+        do {
+          _ = try database.performRetentionMaintenance()
+        } catch {
+          NSLog("Maccy archive retention maintenance failed: \(error.localizedDescription)")
+        }
+      }
     } catch {
       NSLog("Maccy archive database bootstrap failed: \(error.localizedDescription)")
     }
@@ -1386,6 +1856,132 @@ private let archiveDateFormatter: ISO8601DateFormatter = {
 }()
 
 private extension ArchiveDatabase {
+  static let clipboardItemTombstoneKind = "clipboard_item"
+  static let userDeletedTombstoneReason = "user_deleted"
+  static let retentionExpiredTombstoneReason = "retention_expired"
+  static let countLimitTombstoneReason = "retention_count_limit"
+
+  static func retentionRepresentationCandidatesSQL(typePredicate: String) -> String {
+    """
+    SELECT
+      clipboard_representations.id AS representation_id,
+      clipboard_representations.item_id,
+      clipboard_representations.type,
+      clipboard_items.last_seen_at
+    FROM clipboard_representations
+    JOIN clipboard_items ON clipboard_items.id = clipboard_representations.item_id
+    WHERE clipboard_items.deleted_at IS NULL
+      AND clipboard_items.last_seen_at < ?
+      AND \(typePredicate)
+      AND NOT EXISTS (
+        SELECT 1
+        FROM pins
+        WHERE pins.item_id = clipboard_items.id
+      )
+    ORDER BY clipboard_items.last_seen_at ASC, clipboard_representations.id ASC
+    LIMIT ?
+    """
+  }
+
+  static func retentionTypePredicate(for category: ArchiveRetentionContentCategory) -> String {
+    switch category {
+    case .plainText:
+      return "clipboard_representations.type = ?"
+    case .richTextAndWebContent, .images:
+      return "clipboard_representations.type IN (\(placeholders(count: retentionPasteboardTypes(for: category).count)))"
+    case .files:
+      return "clipboard_representations.type = ?"
+    case .otherUnknownBinary:
+      return "clipboard_representations.type NOT IN (\(placeholders(count: knownRetentionPasteboardTypes.count)))"
+    }
+  }
+
+  static func retentionRepresentationCandidateArguments(
+    category: ArchiveRetentionContentCategory,
+    cutoff: String,
+    limit: Int
+  ) -> StatementArguments {
+    var arguments: StatementArguments = [cutoff]
+    arguments += StatementArguments(retentionPasteboardTypes(for: category))
+    arguments += StatementArguments([limit])
+    return arguments
+  }
+
+  static func retentionPasteboardTypes(for category: ArchiveRetentionContentCategory) -> [String] {
+    switch category {
+    case .plainText:
+      return [NSPasteboard.PasteboardType.string.rawValue]
+    case .richTextAndWebContent:
+      return [NSPasteboard.PasteboardType.rtf.rawValue, NSPasteboard.PasteboardType.html.rawValue]
+    case .images:
+      return [
+        NSPasteboard.PasteboardType.png.rawValue,
+        NSPasteboard.PasteboardType.tiff.rawValue,
+        NSPasteboard.PasteboardType.jpeg.rawValue,
+        NSPasteboard.PasteboardType.heic.rawValue,
+      ]
+    case .files:
+      return [NSPasteboard.PasteboardType.fileURL.rawValue]
+    case .otherUnknownBinary:
+      return knownRetentionPasteboardTypes
+    }
+  }
+
+  static let knownRetentionPasteboardTypes = [
+    NSPasteboard.PasteboardType.string.rawValue,
+    NSPasteboard.PasteboardType.rtf.rawValue,
+    NSPasteboard.PasteboardType.html.rawValue,
+    NSPasteboard.PasteboardType.png.rawValue,
+    NSPasteboard.PasteboardType.tiff.rawValue,
+    NSPasteboard.PasteboardType.jpeg.rawValue,
+    NSPasteboard.PasteboardType.heic.rawValue,
+    NSPasteboard.PasteboardType.fileURL.rawValue,
+  ]
+
+  static let itemsOverMaximumCountSQL = """
+    SELECT id
+    FROM (
+      SELECT clipboard_items.id,
+             row_number() OVER (ORDER BY clipboard_items.last_seen_at DESC, clipboard_items.id DESC) AS row_number
+      FROM clipboard_items
+      WHERE clipboard_items.deleted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM pins
+          WHERE pins.item_id = clipboard_items.id
+        )
+    )
+    WHERE row_number > ?
+    ORDER BY row_number ASC
+    LIMIT ?
+    """
+
+  static let expiredTombstonedItemsSQL = """
+    SELECT id
+    FROM clipboard_items
+    WHERE deleted_at IS NOT NULL
+      AND deleted_at < ?
+    ORDER BY deleted_at ASC, id ASC
+    LIMIT ?
+    """
+
+  static let unpinnedItemIDsSQL = """
+    SELECT id
+    FROM clipboard_items
+    WHERE deleted_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM pins
+        WHERE pins.item_id = clipboard_items.id
+      )
+    """
+
+  static let allVisibleItemIDsSQL = """
+    SELECT id
+    FROM clipboard_items
+    WHERE deleted_at IS NULL
+    """
+
   static let schemaTablesSQL = """
     SELECT name
     FROM sqlite_master

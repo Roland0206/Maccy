@@ -58,6 +58,12 @@ struct StorageSettingsPane: View {
 
   @Default(.size) private var size
   @Default(.sortBy) private var sortBy
+  @Default(.archivePlainTextRetention) private var plainTextRetention
+  @Default(.archiveRichTextAndWebContentRetention) private var richTextAndWebContentRetention
+  @Default(.archiveImageRetention) private var imageRetention
+  @Default(.archiveFileRetention) private var fileRetention
+  @Default(.archiveOtherUnknownBinaryRetention) private var otherUnknownBinaryRetention
+  @Default(.archiveMaximumItemCount) private var archiveMaximumItemCount
 
   @State private var viewModel = ViewModel()
   @State private var storageSize = Storage.shared.size
@@ -66,6 +72,13 @@ struct StorageSettingsPane: View {
     let formatter = NumberFormatter()
     formatter.minimum = 1
     formatter.maximum = 999
+    return formatter
+  }()
+
+  private let archiveCountFormatter: NumberFormatter = {
+    let formatter = NumberFormatter()
+    formatter.minimum = 0
+    formatter.maximum = 999_999
     return formatter
   }()
 
@@ -109,6 +122,37 @@ struct StorageSettingsPane: View {
         }
       }
 
+      Settings.Section(label: { Text("Retention", tableName: "StorageSettings") }) {
+        Text("RetentionDescription", tableName: "StorageSettings")
+          .controlSize(.small)
+          .foregroundStyle(.gray)
+
+        retentionPicker("Plain text", selection: $plainTextRetention)
+        retentionPicker("Rich text & web content", selection: $richTextAndWebContentRetention)
+        retentionPicker("Images", selection: $imageRetention)
+        retentionPicker("Files", selection: $fileRetention)
+        retentionPicker("Other / unknown binary", selection: $otherUnknownBinaryRetention)
+
+        HStack {
+          Text("ArchiveMaximumItemCount", tableName: "StorageSettings")
+          TextField("", value: $archiveMaximumItemCount, formatter: archiveCountFormatter)
+            .frame(width: 80)
+            .help(Text("ArchiveMaximumItemCountTooltip", tableName: "StorageSettings"))
+          Stepper("", value: $archiveMaximumItemCount, in: 0...999_999)
+            .labelsHidden()
+        }
+
+        VStack(alignment: .leading) {
+          Button(action: applyPrivacyFriendlyPreset) {
+            Text("PrivacyFriendlyPreset", tableName: "StorageSettings")
+          }
+          Button(action: applyTextForeverNonTextSevenDaysPreset) {
+            Text("TextForeverNonTextSevenDaysPreset", tableName: "StorageSettings")
+          }
+        }
+        .help(Text("RetentionPresetTooltip", tableName: "StorageSettings"))
+      }
+
       Settings.Section(label: { Text("SortBy", tableName: "StorageSettings") }) {
         Picker("", selection: $sortBy) {
           ForEach(Sorter.By.allCases) { mode in
@@ -120,6 +164,36 @@ struct StorageSettingsPane: View {
         .help(Text("SortByTooltip", tableName: "StorageSettings"))
       }
     }
+  }
+
+  private func retentionPicker(_ title: String, selection: Binding<ArchiveRetentionPolicy>) -> some View {
+    HStack {
+      Text(title)
+      Spacer()
+      Picker("", selection: selection) {
+        ForEach(ArchiveRetentionPolicy.allCases) { policy in
+          Text(policy.description).tag(policy)
+        }
+      }
+      .labelsHidden()
+      .frame(width: 130, alignment: .trailing)
+    }
+  }
+
+  private func applyPrivacyFriendlyPreset() {
+    plainTextRetention = .forever
+    richTextAndWebContentRetention = .thirtyDays
+    imageRetention = .sevenDays
+    fileRetention = .thirtyDays
+    otherUnknownBinaryRetention = .sevenDays
+  }
+
+  private func applyTextForeverNonTextSevenDaysPreset() {
+    plainTextRetention = .forever
+    richTextAndWebContentRetention = .sevenDays
+    imageRetention = .sevenDays
+    fileRetention = .sevenDays
+    otherUnknownBinaryRetention = .sevenDays
   }
 }
 
