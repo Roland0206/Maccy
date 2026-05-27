@@ -4,8 +4,10 @@ import Defaults
 import Settings
 
 struct AppearanceSettingsPane: View {
+  @Default(.popupDisplayMode) private var popupDisplayMode
   @Default(.popupPosition) private var popupAt
   @Default(.popupScreen) private var popupScreen
+  @Default(.sidebarPosition) private var sidebarPosition
   @Default(.pinTo) private var pinTo
   @Default(.imageMaxHeight) private var imageHeight
   @Default(.previewDelay) private var previewDelay
@@ -50,6 +52,29 @@ struct AppearanceSettingsPane: View {
 
   var body: some View {
     Settings.Container(contentWidth: 650) {
+      Settings.Section(label: { Text("DisplayMode", tableName: "AppearanceSettings") }) {
+        Picker("", selection: $popupDisplayMode) {
+          ForEach(PopupDisplayMode.allCases) { mode in
+            Text(mode.description)
+          }
+        }
+        .labelsHidden()
+        .frame(width: 141, alignment: .leading)
+        .help(Text("DisplayModeTooltip", tableName: "AppearanceSettings"))
+      }
+
+      Settings.Section(label: { Text("SidebarPosition", tableName: "AppearanceSettings") }) {
+        Picker("", selection: $sidebarPosition) {
+          ForEach(SidebarPosition.allCases) { position in
+            Text(position.description)
+          }
+        }
+        .labelsHidden()
+        .frame(width: 141, alignment: .leading)
+        .help(Text("SidebarPositionTooltip", tableName: "AppearanceSettings"))
+        .disabled(popupDisplayMode != .sidebar)
+      }
+
       Settings.Section(label: { Text("PopupAt", tableName: "AppearanceSettings") }) {
         HStack {
           Picker("", selection: $popupAt) {
@@ -64,6 +89,7 @@ struct AppearanceSettingsPane: View {
           .labelsHidden()
           .frame(width: 141, alignment: .leading)
           .help(Text("PopupAtTooltip", tableName: "AppearanceSettings"))
+          .disabled(popupDisplayMode != .dialog)
 
           if popupAt == .lastPosition {
             Button {
@@ -74,7 +100,7 @@ struct AppearanceSettingsPane: View {
             }
             .buttonStyle(.borderless)
             .help(Text("PopupAtLastLocationReset", tableName: "AppearanceSettings"))
-            .disabled(windowPosition == _windowPosition.defaultValue)
+            .disabled(popupDisplayMode != .dialog || windowPosition == _windowPosition.defaultValue)
           }
         }
       }

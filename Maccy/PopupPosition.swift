@@ -2,6 +2,61 @@ import AppKit.NSEvent
 import Defaults
 import Foundation
 
+enum PopupDisplayMode: String, CaseIterable, Identifiable, CustomStringConvertible, Defaults.Serializable {
+  case dialog
+  case sidebar
+
+  var id: Self { self }
+
+  var description: String {
+    switch self {
+    case .dialog:
+      return NSLocalizedString("DisplayModeDialog", tableName: "AppearanceSettings", comment: "")
+    case .sidebar:
+      return NSLocalizedString("DisplayModeSidebar", tableName: "AppearanceSettings", comment: "")
+    }
+  }
+}
+
+enum SidebarPosition: String, CaseIterable, Identifiable, CustomStringConvertible, Defaults.Serializable {
+  case left
+  case right
+  case top
+  case bottom
+
+  var id: Self { self }
+
+  var description: String {
+    switch self {
+    case .left:
+      return NSLocalizedString("SidebarPositionLeft", tableName: "AppearanceSettings", comment: "")
+    case .right:
+      return NSLocalizedString("SidebarPositionRight", tableName: "AppearanceSettings", comment: "")
+    case .top:
+      return NSLocalizedString("SidebarPositionTop", tableName: "AppearanceSettings", comment: "")
+    case .bottom:
+      return NSLocalizedString("SidebarPositionBottom", tableName: "AppearanceSettings", comment: "")
+    }
+  }
+
+  func frame(contentSize: NSSize, visibleFrame: NSRect) -> NSRect {
+    switch self {
+    case .left:
+      let width = min(contentSize.width, visibleFrame.width)
+      return NSRect(x: visibleFrame.minX, y: visibleFrame.minY, width: width, height: visibleFrame.height)
+    case .right:
+      let width = min(contentSize.width, visibleFrame.width)
+      return NSRect(x: visibleFrame.maxX - width, y: visibleFrame.minY, width: width, height: visibleFrame.height)
+    case .top:
+      let height = min(contentSize.height, visibleFrame.height)
+      return NSRect(x: visibleFrame.minX, y: visibleFrame.maxY - height, width: visibleFrame.width, height: height)
+    case .bottom:
+      let height = min(contentSize.height, visibleFrame.height)
+      return NSRect(x: visibleFrame.minX, y: visibleFrame.minY, width: visibleFrame.width, height: height)
+    }
+  }
+}
+
 enum PopupPosition: String, CaseIterable, Identifiable, CustomStringConvertible, Defaults.Serializable {
   case cursor
   case statusItem

@@ -9,7 +9,7 @@ class FloatingPanel<Content: View>: NSPanel, NSWindowDelegate {
   let onClose: () -> Void
 
   override var isMovable: Bool {
-    get { Defaults[.popupPosition] != .statusItem }
+    get { Defaults[.popupDisplayMode] == .dialog && Defaults[.popupPosition] != .statusItem }
     set {}
   }
 
@@ -72,9 +72,14 @@ class FloatingPanel<Content: View>: NSPanel, NSWindowDelegate {
   }
 
   func open(height: CGFloat, at popupPosition: PopupPosition = Defaults[.popupPosition]) {
-    let size = Defaults[.windowSize]
-    setContentSize(NSSize(width: min(frame.width, size.width), height: min(height, size.height)))
-    setFrameOrigin(popupPosition.origin(size: frame.size, statusBarButton: statusBarButton))
+    if let sidebarFrame = frameForSidebar(height: height) {
+      setFrame(sidebarFrame, display: true)
+    } else {
+      let size = dialogSize(height: height)
+      setContentSize(size)
+      setFrameOrigin(popupPosition.origin(size: frame.size, statusBarButton: statusBarButton))
+    }
+
     orderFrontRegardless()
     makeKey()
     isPresented = true
@@ -86,15 +91,38 @@ class FloatingPanel<Content: View>: NSPanel, NSWindowDelegate {
     }
   }
 
+  private func dialogSize(height: CGFloat) -> NSSize {
+    let size = Defaults[.windowSize]
+    return NSSize(width: min(frame.width, size.width), height: min(height, size.height))
+  }
+
+  private func frameForSidebar(height: CGFloat) -> NSRect? {
+    guard Defaults[.popupDisplayMode] == .sidebar,
+          let visibleFrame = NSScreen.forPopup?.visibleFrame else {
+      return nil
+    }
+
+    let size = Defaults[.windowSize]
+    let contentSize = NSSize(width: min(size.width, visibleFrame.width), height: min(height, size.height))
+    return Defaults[.sidebarPosition].frame(contentSize: contentSize, visibleFrame: visibleFrame)
+  }
+
   func verticallyResize(to newHeight: CGFloat) {
-    var newSize = frame.size
-    newSize.height = newHeight
-    var newOrigin = frame.origin
-    newOrigin.y += (frame.height - newSize.height)
+    let newFrame: NSRect
+
+    if let sidebarFrame = frameForSidebar(height: newHeight) {
+      newFrame = sidebarFrame
+    } else {
+      var newSize = frame.size
+      newSize.height = newHeight
+      var newOrigin = frame.origin
+      newOrigin.y += (frame.height - newSize.height)
+      newFrame = NSRect(origin: newOrigin, size: newSize)
+    }
 
     NSAnimationContext.runAnimationGroup { (context) in
       context.duration = 0.2
-      animator().setFrame(NSRect(origin: newOrigin, size: newSize), display: true)
+      animator().setFrame(newFrame, display: true)
     }
   }
 
@@ -106,6 +134,8 @@ class FloatingPanel<Content: View>: NSPanel, NSWindowDelegate {
   }
 
   func saveWindowPosition() {
+    guard Defaults[.popupDisplayMode] == .dialog else { return }
+
     if let screenFrame = screen?.visibleFrame {
       // Only store the size of the window without the preview
       let width = AppState.shared.preview.contentWidth
@@ -117,7 +147,19 @@ class FloatingPanel<Content: View>: NSPanel, NSWindowDelegate {
   }
 
   func saveWindowFrame(frame: NSRect) {
-    Defaults[.windowSize] = frame.size
+    var size = frame.size
+
+    if Defaults[.popupDisplayMode] == .sidebar {
+      let savedSize = Defaults[.windowSize]
+      switch Defaults[.sidebarPosition] {
+      case .left, .right:
+        size.height = savedSize.height
+      case .top, .bottom:
+        size.width = savedSize.width
+      }
+    }
+
+    Defaults[.windowSize] = size
     saveWindowPosition()
   }
 
