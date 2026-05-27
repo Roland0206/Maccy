@@ -8,3 +8,9 @@
 "ClearHistoryOnQuitTooltip" = "Automatically remove all unpinned items before quitting the application.";
 "ClearSystemClipboard" = "Clear the system clipboard too";
 "ClearSystemClipboardTooltip" = "When enabled, clearing the history would also clear the current system clipboard.";
+"ImportExport" = "Import / Export";
+"ImportOldMaccyHistory" = "Import old Maccy history…";
+"ExportPortableArchive" = "Export portable archive…";
+"ImportExportDescription" = "Import old Core Data history from Storage.sqlite into the archive database, or export the current archive database and payload files as a portable .maccyarchive package.";
+"ChooseOldMaccyHistory" = "Choose Storage.sqlite from an older Maccy installation.";
+"ChoosePortableArchiveDestination" = "Choose where to save the portable Maccy archive.";

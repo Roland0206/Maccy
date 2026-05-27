@@ -1,4 +1,5 @@
 import AppKit
+import CoreData
 import Defaults
 import Foundation
 import XCTest
@@ -1060,6 +1061,164 @@ final class ArchiveDatabaseTests: XCTestCase {
     XCTAssertEqual(try database.pinnedItems(), [])
     XCTAssertEqual(try database.firstRecentPage(limit: 10).items, [])
     XCTAssertTrue(try database.archiveSnapshot().items.allSatisfy { $0.deletedAt != nil })
+  }
+
+  @MainActor
+  func testOldMaccyImporterReadsCoreDataStorageAndImportsArchiveRows() throws {
+    let oldStoreURL = tempDirectory.appending(path: "Storage.sqlite")
+    let firstCopiedAt = Date(timeIntervalSince1970: 100)
+    let lastCopiedAt = Date(timeIntervalSince1970: 200)
+    try writeOldMaccyStore(
+      at: oldStoreURL,
+      title: "Old Item",
+      application: "com.example.Old",
+      firstCopiedAt: firstCopiedAt,
+      lastCopiedAt: lastCopiedAt,
+      numberOfCopies: 3,
+      pin: "b",
+      contents: [(NSPasteboard.PasteboardType.string.rawValue, Data("old text".utf8))]
+    )
+    let database = try ArchiveDatabase.open(at: tempDirectory.appending(path: "Archive.sqlite"))
+
+    let report = try OldMaccyHistoryImporter().importHistory(from: oldStoreURL, into: database)
+    let item = try XCTUnwrap(database.archiveSnapshot().items.first)
+
+    XCTAssertEqual(report.itemsImported, 1)
+    XCTAssertEqual(report.representationsImported, 1)
+    XCTAssertEqual(item.title, "Old Item")
+    XCTAssertEqual(item.sourceAppBundleIdentifier, "com.example.Old")
+    XCTAssertEqual(item.changeCount, 3)
+    XCTAssertEqual(item.pinKey, "b")
+    XCTAssertEqual(item.representations.first?.type, NSPasteboard.PasteboardType.string.rawValue)
+    XCTAssertEqual(item.representations.first?.value, Data("old text".utf8))
+  }
+
+  @MainActor
+  func testPortableArchiveExportCopiesDatabaseManifestAndPayloads() throws {
+    let databaseURL = tempDirectory.appending(path: "Archive.sqlite")
+    let payloadStore = ArchivePayloadStore(rootDirectory: tempDirectory.appending(path: "Payloads"))
+    let database = try ArchiveDatabase.open(
+      at: databaseURL,
+      payloadStore: payloadStore,
+      inlinePayloadThresholdBytes: 1
+    )
+    _ = try database.importLegacyHistoryItems([
+      historyItem(title: "Exported", contents: [content(.string, Data("external payload".utf8))]),
+    ])
+    let destinationURL = tempDirectory.appending(path: "Portable.maccyarchive")
+
+    let exportedURL = try ArchivePortableExporter().export(
+      database: database,
+      databaseURL: databaseURL,
+      payloadStore: payloadStore,
+      to: destinationURL,
+      now: Date(timeIntervalSince1970: 1)
+    )
+
+    XCTAssertEqual(exportedURL, destinationURL)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: destinationURL.appending(path: "Archive.sqlite").path))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: destinationURL.appending(path: "Payloads").path))
+    XCTAssertEqual(try payloadFileCount(in: destinationURL.appending(path: "Payloads")), 1)
+
+    let manifestData = try Data(contentsOf: destinationURL.appending(path: "manifest.json"))
+    let manifest = try JSONDecoder().decode(ArchivePortableManifest.self, from: manifestData)
+    XCTAssertEqual(manifest.formatVersion, 1)
+    XCTAssertEqual(manifest.databaseFilename, "Archive.sqlite")
+    XCTAssertEqual(manifest.payloadsDirectory, "Payloads")
+    XCTAssertEqual(manifest.payloadFileCount, 1)
+  }
+
+  private func writeOldMaccyStore(
+    at url: URL,
+    title: String,
+    application: String,
+    firstCopiedAt: Date,
+    lastCopiedAt: Date,
+    numberOfCopies: Int,
+    pin: String?,
+    contents: [(String, Data)]
+  ) throws {
+    let model = oldMaccyManagedObjectModel()
+    let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
+    try coordinator.addPersistentStore(ofType: NSSQLiteStoreType, configurationName: nil, at: url)
+    let context = NSManagedObjectContext(concurrencyType: .mainQueueConcurrencyType)
+    context.persistentStoreCoordinator = coordinator
+
+    let itemEntity = try XCTUnwrap(model.entitiesByName["HistoryItem"])
+    let contentEntity = try XCTUnwrap(model.entitiesByName["HistoryItemContent"])
+    let item = NSManagedObject(entity: itemEntity, insertInto: context)
+    item.setValue(application, forKey: "application")
+    item.setValue(firstCopiedAt, forKey: "firstCopiedAt")
+    item.setValue(lastCopiedAt, forKey: "lastCopiedAt")
+    item.setValue(numberOfCopies, forKey: "numberOfCopies")
+    item.setValue(pin, forKey: "pin")
+    item.setValue(title, forKey: "title")
+
+    for (type, value) in contents {
+      let content = NSManagedObject(entity: contentEntity, insertInto: context)
+      content.setValue(type, forKey: "type")
+      content.setValue(value, forKey: "value")
+      content.setValue(item, forKey: "item")
+    }
+
+    try context.save()
+  }
+
+  private func oldMaccyManagedObjectModel() -> NSManagedObjectModel {
+    let itemEntity = NSEntityDescription()
+    itemEntity.name = "HistoryItem"
+    itemEntity.managedObjectClassName = "NSManagedObject"
+
+    let contentEntity = NSEntityDescription()
+    contentEntity.name = "HistoryItemContent"
+    contentEntity.managedObjectClassName = "NSManagedObject"
+
+    let application = attribute("application", type: .stringAttributeType, optional: true)
+    let firstCopiedAt = attribute("firstCopiedAt", type: .dateAttributeType)
+    let lastCopiedAt = attribute("lastCopiedAt", type: .dateAttributeType)
+    let numberOfCopies = attribute("numberOfCopies", type: .integer64AttributeType)
+    let pin = attribute("pin", type: .stringAttributeType, optional: true)
+    let title = attribute("title", type: .stringAttributeType, optional: true)
+    let type = attribute("type", type: .stringAttributeType, optional: true)
+    let value = attribute("value", type: .binaryDataAttributeType, optional: true)
+
+    let itemContents = NSRelationshipDescription()
+    itemContents.name = "contents"
+    itemContents.destinationEntity = contentEntity
+    itemContents.minCount = 0
+    itemContents.maxCount = 0
+    itemContents.deleteRule = .cascadeDeleteRule
+    itemContents.isOptional = true
+
+    let contentItem = NSRelationshipDescription()
+    contentItem.name = "item"
+    contentItem.destinationEntity = itemEntity
+    contentItem.minCount = 0
+    contentItem.maxCount = 1
+    contentItem.deleteRule = .nullifyDeleteRule
+    contentItem.isOptional = true
+
+    itemContents.inverseRelationship = contentItem
+    contentItem.inverseRelationship = itemContents
+
+    itemEntity.properties = [application, firstCopiedAt, lastCopiedAt, numberOfCopies, pin, title, itemContents]
+    contentEntity.properties = [type, value, contentItem]
+
+    let model = NSManagedObjectModel()
+    model.entities = [itemEntity, contentEntity]
+    return model
+  }
+
+  private func attribute(
+    _ name: String,
+    type: NSAttributeType,
+    optional: Bool = false
+  ) -> NSAttributeDescription {
+    let attribute = NSAttributeDescription()
+    attribute.name = name
+    attribute.attributeType = type
+    attribute.isOptional = optional
+    return attribute
   }
 
   private func historyItem(
