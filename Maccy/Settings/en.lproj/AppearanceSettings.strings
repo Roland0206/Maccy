@@ -1,4 +1,14 @@
 "Title" = "Appearance";
+"DisplayMode" = "Display mode:";
+"DisplayModeDialog" = "Dialog";
+"DisplayModeSidebar" = "Sidebar";
+"DisplayModeTooltip" = "Choose whether Maccy opens as a floating dialog or docked sidebar.\nDefault: Dialog.";
+"SidebarPosition" = "Sidebar position:";
+"SidebarPositionLeft" = "Left";
+"SidebarPositionRight" = "Right";
+"SidebarPositionTop" = "Top";
+"SidebarPositionBottom" = "Bottom";
+"SidebarPositionTooltip" = "Choose the screen edge for sidebar mode.\nDefault: Left.";
 "PopupAt" = "Popup at:";
 "PopupAtCursor" = "Cursor";
 "PopupAtMenuBarIcon" = "Menu icon";
