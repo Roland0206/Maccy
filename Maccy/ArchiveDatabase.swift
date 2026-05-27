@@ -508,6 +508,227 @@ struct ArchivePayloadStore {
   }
 }
 
+enum OldMaccyHistoryImporterError: LocalizedError, Equatable {
+  case missingStore(URL)
+  case invalidStore(URL, String)
+
+  var errorDescription: String? {
+    switch self {
+    case .missingStore(let url):
+      return "Old Maccy history store not found at \(url.path)"
+    case .invalidStore(let url, let reason):
+      return "Could not read old Maccy history store at \(url.path): \(reason)"
+    }
+  }
+}
+
+struct OldMaccyHistoryImporter {
+  @MainActor
+  func importHistory(from sqliteURL: URL, into database: ArchiveDatabase) throws -> ArchiveImportReport {
+    try database.importLegacyHistoryItems(loadItems(from: sqliteURL))
+  }
+
+  @MainActor
+  func loadItems(from sqliteURL: URL) throws -> [HistoryItem] {
+    guard FileManager.default.fileExists(atPath: sqliteURL.path) else {
+      throw OldMaccyHistoryImporterError.missingStore(sqliteURL)
+    }
+
+    do {
+      var configuration = Configuration()
+      configuration.readonly = true
+      let queue = try DatabaseQueue(path: sqliteURL.path, configuration: configuration)
+      let rows = try queue.read { db in
+        try OldMaccyItemRow.fetchAll(db, sql: Self.itemsSQL)
+      }
+      let contentRows = try queue.read { db in
+        try OldMaccyContentRow.fetchAll(db, sql: Self.contentsSQL)
+      }
+      let contentsByItemID = Dictionary(grouping: contentRows, by: \.itemID)
+
+      return rows.map { row in
+        let contents = contentsByItemID[row.id, default: []].compactMap { contentRow -> HistoryItemContent? in
+          guard let type = contentRow.type else { return nil }
+          return HistoryItemContent(type: type, value: contentRow.value)
+        }
+        let item = HistoryItem(contents: contents)
+        item.application = row.application
+        item.firstCopiedAt = row.firstCopiedAt.map(Self.coreDataDate) ?? Date()
+        item.lastCopiedAt = row.lastCopiedAt.map(Self.coreDataDate) ?? item.firstCopiedAt
+        item.numberOfCopies = max(row.numberOfCopies ?? 1, 1)
+        item.pin = row.pin?.isEmpty == true ? nil : row.pin
+        item.title = row.title ?? ""
+        return item
+      }
+    } catch let error as OldMaccyHistoryImporterError {
+      throw error
+    } catch {
+      throw OldMaccyHistoryImporterError.invalidStore(sqliteURL, error.localizedDescription)
+    }
+  }
+
+  private static let itemsSQL = """
+    SELECT
+      Z_PK AS id,
+      ZAPPLICATION AS application,
+      ZFIRSTCOPIEDAT AS firstCopiedAt,
+      ZLASTCOPIEDAT AS lastCopiedAt,
+      ZNUMBEROFCOPIES AS numberOfCopies,
+      ZPIN AS pin,
+      ZTITLE AS title
+    FROM ZHISTORYITEM
+    ORDER BY Z_PK
+  """
+
+  private static let contentsSQL = """
+    SELECT
+      ZITEM AS itemID,
+      ZTYPE AS type,
+      ZVALUE AS value
+    FROM ZHISTORYITEMCONTENT
+    ORDER BY Z_PK
+  """
+
+  private static func coreDataDate(_ timestamp: Double) -> Date {
+    Date(timeIntervalSinceReferenceDate: timestamp)
+  }
+}
+
+private struct OldMaccyItemRow: FetchableRecord {
+  let id: Int64
+  let application: String?
+  let firstCopiedAt: Double?
+  let lastCopiedAt: Double?
+  let numberOfCopies: Int?
+  let pin: String?
+  let title: String?
+
+  init(row: Row) throws {
+    id = row["id"]
+    application = row["application"]
+    firstCopiedAt = row["firstCopiedAt"]
+    lastCopiedAt = row["lastCopiedAt"]
+    numberOfCopies = row["numberOfCopies"]
+    pin = row["pin"]
+    title = row["title"]
+  }
+}
+
+private struct OldMaccyContentRow: FetchableRecord {
+  let itemID: Int64
+  let type: String?
+  let value: Data?
+
+  init(row: Row) throws {
+    itemID = row["itemID"]
+    type = row["type"]
+    value = row["value"]
+  }
+}
+
+struct ArchivePortableManifest: Codable, Equatable {
+  let formatVersion: Int
+  let exportedAt: String
+  let databaseFilename: String
+  let payloadsDirectory: String
+  let payloadFileCount: Int
+}
+
+enum ArchivePortableExporterError: LocalizedError, Equatable {
+  case missingDatabase(URL)
+
+  var errorDescription: String? {
+    switch self {
+    case .missingDatabase(let url):
+      return "Archive database not found at \(url.path)"
+    }
+  }
+}
+
+struct ArchivePortableExporter {
+  static let fileExtension = "maccyarchive"
+
+  private let fileManager: FileManager
+
+  init(fileManager: FileManager = .default) {
+    self.fileManager = fileManager
+  }
+
+  func export(
+    database: ArchiveDatabase,
+    databaseURL: URL,
+    payloadStore: ArchivePayloadStore,
+    to destinationURL: URL,
+    now: Date = Date()
+  ) throws -> URL {
+    try database.checkpointForPortableExport()
+
+    guard fileManager.fileExists(atPath: databaseURL.path) else {
+      throw ArchivePortableExporterError.missingDatabase(databaseURL)
+    }
+
+    let stagingURL = fileManager.temporaryDirectory
+      .appending(path: "MaccyArchiveExport-\(UUID().uuidString)")
+    let exportedDatabaseURL = stagingURL.appending(path: "Archive.sqlite")
+    let exportedPayloadsURL = stagingURL.appending(path: "Payloads")
+    let payloadFileCount = (try? payloadStore.files().count) ?? 0
+    let manifest = ArchivePortableManifest(
+      formatVersion: 1,
+      exportedAt: Self.timestampFormatter.string(from: now),
+      databaseFilename: exportedDatabaseURL.lastPathComponent,
+      payloadsDirectory: exportedPayloadsURL.lastPathComponent,
+      payloadFileCount: payloadFileCount
+    )
+
+    do {
+      try fileManager.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+      try fileManager.copyItem(at: databaseURL, to: exportedDatabaseURL)
+      if fileManager.fileExists(atPath: payloadStore.rootDirectory.path) {
+        try fileManager.copyItem(at: payloadStore.rootDirectory, to: exportedPayloadsURL)
+      } else {
+        try fileManager.createDirectory(at: exportedPayloadsURL, withIntermediateDirectories: true)
+      }
+      try JSONEncoder.prettyPrinted.encode(manifest).write(to: stagingURL.appending(path: "manifest.json"))
+
+      if fileManager.fileExists(atPath: destinationURL.path) {
+        try fileManager.removeItem(at: destinationURL)
+      }
+      try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try fileManager.moveItem(at: stagingURL, to: destinationURL)
+      return destinationURL
+    } catch {
+      try? fileManager.removeItem(at: stagingURL)
+      throw error
+    }
+  }
+
+  static func defaultArchiveName(now: Date = Date()) -> String {
+    "Maccy Archive \(filenameDateFormatter.string(from: now)).\(fileExtension)"
+  }
+
+  private static let timestampFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    return formatter
+  }()
+
+  private static let filenameDateFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+    return formatter
+  }()
+}
+
+private extension JSONEncoder {
+  static var prettyPrinted: JSONEncoder {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    return encoder
+  }
+}
+
 private struct SearchDocumentRow: FetchableRecord {
   let itemID: Int64
   let title: String?
@@ -860,6 +1081,12 @@ final class ArchiveDatabase {
     }
     try payloadStore.removeEmptyDirectories()
     return orphans
+  }
+
+  func checkpointForPortableExport() throws {
+    try pool.writeWithoutTransaction { db in
+      try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+    }
   }
 
   func tombstones() throws -> [ArchiveTombstoneSnapshot] {
