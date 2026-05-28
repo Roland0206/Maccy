@@ -134,6 +134,8 @@ class NavigationManager { // swiftlint:disable:this type_body_length
   }
 
   func selectWithoutScrolling(id: UUID) {
+    guard leadSelection != id else { return }
+
     if let stack = history.pasteStack,
        stack.id == id {
       selectWithoutScrolling(item: nil, footerItem: nil)
