@@ -28,6 +28,7 @@
 		2F578C432EFFE8920088B759 /* SlideoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F578C412EFFE8920088B759 /* SlideoutView.swift */; };
 		2F6A00022F30000000000005 /* ArchiveDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00012F30000000000005 /* ArchiveDatabase.swift */; };
 		2F6A00042F30000000000005 /* ArchiveDatabaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00032F30000000000005 /* ArchiveDatabaseTests.swift */; };
+		2F6A00082F30000000000008 /* AppDelegateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00092F30000000000009 /* AppDelegateTests.swift */; };
 		2F6A00072F30000000000005 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 2F6A00062F30000000000005 /* GRDB */; };
 		2F6A00112F30001100000001 /* ArchiveMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00102F30001100000001 /* ArchiveMode.swift */; };
 		2F6A00132F30001100000001 /* ArchiveModeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6A00122F30001100000001 /* ArchiveModeView.swift */; };
@@ -206,6 +207,7 @@
 		2F578C412EFFE8920088B759 /* SlideoutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideoutView.swift; sourceTree = "<group>"; };
 		2F6A00012F30000000000005 /* ArchiveDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveDatabase.swift; sourceTree = "<group>"; };
 		2F6A00032F30000000000005 /* ArchiveDatabaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveDatabaseTests.swift; sourceTree = "<group>"; };
+		2F6A00092F30000000000009 /* AppDelegateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegateTests.swift; sourceTree = "<group>"; };
 		2F6A00102F30001100000001 /* ArchiveMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveMode.swift; sourceTree = "<group>"; };
 		2F6A00122F30001100000001 /* ArchiveModeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveModeView.swift; sourceTree = "<group>"; };
 		2F6A00142F30001100000001 /* ArchiveModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveModeTests.swift; sourceTree = "<group>"; };
@@ -730,6 +732,7 @@
 			isa = PBXGroup;
 			children = (
 				DA48AE852A5F0077006D4894 /* Fixtures */,
+				2F6A00092F30000000000009 /* AppDelegateTests.swift */,
 				2F6A00032F30000000000005 /* ArchiveDatabaseTests.swift */,
 				2F6A00142F30001100000001 /* ArchiveModeTests.swift */,
 				DA3CE7FF1E44A62500B3AA98 /* ClipboardTests.swift */,
@@ -1077,6 +1080,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2F6A00082F30000000000008 /* AppDelegateTests.swift in Sources */,
 				2F6A00042F30000000000005 /* ArchiveDatabaseTests.swift in Sources */,
 				2F6A00152F30001100000001 /* ArchiveModeTests.swift in Sources */,
 				DAFE2DE9268A9B1B00990986 /* HistoryItemTests.swift in Sources */,
