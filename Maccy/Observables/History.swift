@@ -10,6 +10,8 @@ import Settings
 @Observable
 class History: ItemsContainer { // swiftlint:disable:this type_body_length
   static let shared = History()
+  static let recentPagePrefetchDistance = 10
+
   let logger = Logger(label: "org.p0deje.Maccy")
 
   var items: [HistoryItemDecorator] = []
@@ -182,12 +184,16 @@ class History: ItemsContainer { // swiftlint:disable:this type_body_length
   private func shouldLoadMoreRecentRows(after item: HistoryItemDecorator?) -> Bool {
     guard searchQuery.isEmpty,
           nextRecentRowsCursor != nil,
-          let item,
-          let index = unpinnedItems.firstIndex(of: item) else {
+          let item else {
       return false
     }
 
-    return index >= max(unpinnedItems.count - 10, 0)
+    let recentItems = unpinnedItems
+    guard let index = recentItems.firstIndex(of: item) else {
+      return false
+    }
+
+    return index >= max(recentItems.count - Self.recentPagePrefetchDistance, 0)
   }
 
   @MainActor

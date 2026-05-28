@@ -6,6 +6,7 @@ struct HistoryItemView: View {
   var previous: HistoryItemDecorator?
   var next: HistoryItemDecorator?
   var index: Int
+  var shouldLoadMoreRecentRowsOnAppear = false
 
   private var visualIndex: Int? {
     if appState.navigator.isMultiSelectInProgress && item.selectionIndex >= 0 {
@@ -74,6 +75,8 @@ struct HistoryItemView: View {
     }
     .onAppear {
       item.ensureThumbnailImage()
+      guard shouldLoadMoreRecentRowsOnAppear else { return }
+
       Task {
         await appState.history.loadMoreRecentRowsIfNeeded(after: item)
       }

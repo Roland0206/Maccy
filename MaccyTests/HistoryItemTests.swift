@@ -404,6 +404,35 @@ class PopupHistoryStoreSeamTests: XCTestCase {
     XCTAssertFalse(legacyStore.didLoadAll)
   }
 
+  func testHistoryDefersNextRecentPageUntilPrefetchThreshold() async throws {
+    Defaults[.popupRecentPageSize] = 20
+    Defaults[.size] = 50
+    let firstRows = (0..<20).map { index in
+      PopupHistoryRow(legacyItem: historyItem(
+        "item \(index)",
+        lastCopiedAt: TimeInterval(20 - index)
+      ))
+    }
+    let nextRows = [PopupHistoryRow(legacyItem: historyItem("older", lastCopiedAt: 0))]
+    let cursor = PopupHistoryPageCursor.archive(ArchiveRecentPageCursor(lastCopiedAt: "1", id: 1))
+    popupStore.page = PopupHistoryPage(pinnedRows: [], recentRows: firstRows, nextRecentCursor: cursor)
+    popupStore.nextRecentPage = PopupHistoryRecentPage(rows: nextRows, nextCursor: nil)
+    let history = History(historyStore: legacyStore, popupHistoryStore: popupStore)
+
+    try await history.load()
+    let beforeThresholdLoaded = await history.loadMoreRecentRowsIfNeeded(
+      after: history.unpinnedItems[History.recentPagePrefetchDistance - 1]
+    )
+    let atThresholdLoaded = await history.loadMoreRecentRowsIfNeeded(
+      after: history.unpinnedItems[History.recentPagePrefetchDistance]
+    )
+
+    XCTAssertFalse(beforeThresholdLoaded)
+    XCTAssertTrue(atThresholdLoaded)
+    XCTAssertEqual(popupStore.loadedMoreRecentLimits, [20])
+    XCTAssertEqual(popupStore.loadedMoreRecentCursors, [cursor])
+  }
+
   func testHistorySearchUsesArchiveSearchStoreRows() async throws {
     let cached = historyItem("cached", lastCopiedAt: 1)
     let result = historyItem("needle result", lastCopiedAt: 2)
