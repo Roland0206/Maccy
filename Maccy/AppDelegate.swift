@@ -22,6 +22,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private var statusItemVisibilityObserver: NSKeyValueObservation?
+  private var isSystemTerminating = false
+
+  deinit {
+    NSWorkspace.shared.notificationCenter.removeObserver(self)
+  }
 
   func applicationWillFinishLaunching(_ notification: Notification) { // swiftlint:disable:this function_body_length
     #if DEBUG
@@ -36,6 +41,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Bridge FloatingPanel via AppDelegate.
     AppState.shared.appDelegate = self
+
+    NSWorkspace.shared.notificationCenter.addObserver(
+      self,
+      selector: #selector(workspaceWillPowerOff),
+      name: NSWorkspace.willPowerOffNotification,
+      object: nil
+    )
 
     Clipboard.shared.onNewCopy { History.shared.add($0) }
     Clipboard.shared.start()
@@ -108,9 +120,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
-    if Defaults[.clearOnQuit] {
+    if shouldClearHistoryOnTerminate {
       AppState.shared.history.clear()
     }
+  }
+
+  var shouldClearHistoryOnTerminate: Bool {
+    Defaults[.clearOnQuit] && !isSystemTerminating
+  }
+
+  @objc
+  func workspaceWillPowerOff(_ notification: Notification) {
+    isSystemTerminating = true
   }
 
   private func migrateUserDefaults() {
